@@ -88,111 +88,111 @@ class FrontOfficeDB:
 
 
     def _init_db(self):
-    with self.engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS reservations (
-            id SERIAL PRIMARY KEY,
-            amount_pending DECIMAL(10,2),
-            arrival_date DATE,
-            depart_date DATE,
-            room_number VARCHAR(10),
-            room_type_code VARCHAR(20),
-            adults INTEGER,
-            children INTEGER,
-            total_guests INTEGER,
-            reservation_no VARCHAR(50),
-            voucher VARCHAR(100),
-            related_reservation VARCHAR(50),
-            crs_code VARCHAR(50),
-            crs_name VARCHAR(200),
-            guest_id_raw VARCHAR(50),
-            guest_name VARCHAR(200),
-            vip_flag VARCHAR(50),
-            client_id VARCHAR(50),
-            main_client VARCHAR(200),
-            nights INTEGER,
-            meal_plan VARCHAR(50),
-            rate_code VARCHAR(50),
-            channel VARCHAR(100),
-            cancellation_policy VARCHAR(200),
-            main_remark TEXT,
-            contact_name VARCHAR(200),
-            contact_phone VARCHAR(50),
-            contact_email VARCHAR(200),
-            total_remarks TEXT,
-            source_of_business VARCHAR(200),
-            stay_option_desc TEXT,
-            remarks_by_chain TEXT,
-            reservation_group_id VARCHAR(50),
-            reservation_group_name VARCHAR(200),
-            company_name VARCHAR(200),
-            company_id_raw VARCHAR(50),
-            country VARCHAR(50),
-            reservation_status VARCHAR(50) DEFAULT 'CONFIRMED',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """))
-        
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS stays (
-            id SERIAL PRIMARY KEY,
-            reservation_id INTEGER REFERENCES reservations(id),
-            room_number VARCHAR(10),
-            status VARCHAR(20) DEFAULT 'EXPECTED',
-            checkin_planned DATE,
-            checkout_planned DATE,
-            checkin_actual TIMESTAMP,
-            checkout_actual TIMESTAMP,
-            breakfast_code VARCHAR(20),
-            comment TEXT,
-            parking_space VARCHAR(20),
-            parking_plate VARCHAR(50),
-            parking_notes TEXT
-        )
-        """))
-        
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS rooms (
-            room_number VARCHAR(10) PRIMARY KEY,
-            room_type VARCHAR(50),
-            floor INTEGER,
-            status VARCHAR(20) DEFAULT 'VACANT',
-            is_twin INTEGER DEFAULT 0
-        )
-        """))
-        
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id SERIAL PRIMARY KEY,
-            task_date DATE,
-            title TEXT,
-            created_by VARCHAR(100),
-            assigned_to VARCHAR(100),
-            comment TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """))
-        
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS no_shows (
-            id SERIAL PRIMARY KEY,
-            arrival_date DATE,
-            guest_name VARCHAR(200),
-            main_client VARCHAR(200),
-            charged INTEGER,
-            comment TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """))
-        
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS spare_rooms (
-            id SERIAL PRIMARY KEY,
-            target_date DATE,
-            room_number VARCHAR(10)
-        )
-        """))
+           with self.engine.begin() as conn:
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS reservations (
+                   id SERIAL PRIMARY KEY,
+                   amount_pending DECIMAL(10,2),
+                   arrival_date DATE,
+                   depart_date DATE,
+                   room_number VARCHAR(10),
+                   room_type_code VARCHAR(20),
+                   adults INTEGER,
+                   children INTEGER,
+                   total_guests INTEGER,
+                   reservation_no VARCHAR(50),
+                   voucher VARCHAR(100),
+                   related_reservation VARCHAR(50),
+                   crs_code VARCHAR(50),
+                   crs_name VARCHAR(200),
+                   guest_id_raw VARCHAR(50),
+                   guest_name VARCHAR(200),
+                   vip_flag VARCHAR(50),
+                   client_id VARCHAR(50),
+                   main_client VARCHAR(200),
+                   nights INTEGER,
+                   meal_plan VARCHAR(50),
+                   rate_code VARCHAR(50),
+                   channel VARCHAR(100),
+                   cancellation_policy VARCHAR(200),
+                   main_remark TEXT,
+                   contact_name VARCHAR(200),
+                   contact_phone VARCHAR(50),
+                   contact_email VARCHAR(200),
+                   total_remarks TEXT,
+                   source_of_business VARCHAR(200),
+                   stay_option_desc TEXT,
+                   remarks_by_chain TEXT,
+                   reservation_group_id VARCHAR(50),
+                   reservation_group_name VARCHAR(200),
+                   company_name VARCHAR(200),
+                   company_id_raw VARCHAR(50),
+                   country VARCHAR(50),
+                   reservation_status VARCHAR(50) DEFAULT 'CONFIRMED',
+                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+               )
+               """))
+               
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS stays (
+                   id SERIAL PRIMARY KEY,
+                   reservation_id INTEGER REFERENCES reservations(id),
+                   room_number VARCHAR(10),
+                   status VARCHAR(20) DEFAULT 'EXPECTED',
+                   checkin_planned DATE,
+                   checkout_planned DATE,
+                   checkin_actual TIMESTAMP,
+                   checkout_actual TIMESTAMP,
+                   breakfast_code VARCHAR(20),
+                   comment TEXT,
+                   parking_space VARCHAR(20),
+                   parking_plate VARCHAR(50),
+                   parking_notes TEXT
+               )
+               """))
+               
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS rooms (
+                   room_number VARCHAR(10) PRIMARY KEY,
+                   room_type VARCHAR(50),
+                   floor INTEGER,
+                   status VARCHAR(20) DEFAULT 'VACANT',
+                   is_twin INTEGER DEFAULT 0
+               )
+               """))
+               
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS tasks (
+                   id SERIAL PRIMARY KEY,
+                   task_date DATE,
+                   title TEXT,
+                   created_by VARCHAR(100),
+                   assigned_to VARCHAR(100),
+                   comment TEXT,
+                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+               )
+               """))
+               
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS no_shows (
+                   id SERIAL PRIMARY KEY,
+                   arrival_date DATE,
+                   guest_name VARCHAR(200),
+                   main_client VARCHAR(200),
+                   charged INTEGER,
+                   comment TEXT,
+                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+               )
+               """))
+               
+               conn.execute(text("""
+               CREATE TABLE IF NOT EXISTS spare_rooms (
+                   id SERIAL PRIMARY KEY,
+                   target_date DATE,
+                   room_number VARCHAR(10)
+               )
+               """))
 
     def get_breakfast_list_for_date(self, target_date: date):
         return self._fetch_all("""
