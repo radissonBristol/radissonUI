@@ -175,7 +175,62 @@ class FrontOfficeDB:
                 room_number TEXT
             )
             """)
+    def is_valid_room_number(self, room_number: str) -> tuple[bool, str]:
+        """Check if room number is valid (integer within ROOM_BLOCKS)"""
+        if not room_number or not room_number.strip():
+            return False, "Room number cannot be empty"
+        
+        # Try to parse as integer (reject decimals)
+        try:
+            # First check if it contains a decimal point
+            if '.' in room_number.strip():
+                return False, "Room number cannot have decimals. Use whole numbers only"
+            
+            room_int = int(room_number.strip())
+        except:
+            return False, "Room number must be a valid whole number"
+        
+        # Check if it's in valid ranges
+        for start, end in ROOM_BLOCKS:
+            if start <= room_int <= end:
+                return True, str(room_int)
+        
+        # Not in any valid range
+        valid_ranges = ", ".join([f"{s}-{e}" for s, e in ROOM_BLOCKS])
+        return False, f"Room {room_int} not in valid ranges: {valid_ranges}"
 
+    def check_room_available_for_assignment(self, room_number: str, arrival_date: date, depart_date: date, exclude_reservation_id: int = None):
+        """Check if room is available for assignment during the stay period"""
+        if not room_number or not room_number.strip():
+            return True, ""
+        
+        # Normalize room number (remove decimals)
+        try:
+            rn = str(int(float(room_number.strip())))
+        except:
+            return False, "Invalid room number format"
+        
+        with closing(self._get_conn()) as conn:
+            c = conn.cursor()
+            # Check for any CHECKED_IN stays that overlap with this reservation period
+            c.execute("""
+            SELECT s.id, r.guest_name, s.checkin_planned, s.checkout_planned, r.reservation_no
+            FROM stays s
+            JOIN reservations r ON r.id = s.reservation_id
+            WHERE s.room_number = ?
+            AND s.status = 'CHECKED_IN'
+            AND DATE(s.checkin_planned) < DATE(?)
+            AND DATE(s.checkout_planned) > DATE(?)
+            AND (? IS NULL OR r.id != ?)
+            """, (rn, depart_date.isoformat(), arrival_date.isoformat(), exclude_reservation_id, exclude_reservation_id))
+            conflict = c.fetchone()
+            
+            if conflict:
+                return False, f"Room {rn} is occupied by {conflict['guest_name']} (Res {conflict['reservation_no']}) until {conflict['checkout_planned']}"
+        
+        return True, ""
+
+   
     def reservations_empty(self) -> bool:
         with closing(self._get_conn()) as conn:
             c = conn.cursor()
@@ -184,6 +239,7 @@ class FrontOfficeDB:
             return row["cnt"] == 0
 
     def _build_reservations_from_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        
         df.columns = [str(c).strip() for c in df.columns]
 
         col_map = {
@@ -231,7 +287,23 @@ class FrontOfficeDB:
         for col in ["arrival_date", "depart_date"]:
             df_db[col] = pd.to_datetime(df_db[col], errors="coerce").dt.date.astype(str)
 
+        # FIX: Convert numeric fields to whole numbers (remove decimals)
+        numeric_cols = ["reservation_no", "voucher", "guest_id_raw", "client_id", 
+                        "company_id_raw", "reservation_group_id"]
+        for col in numeric_cols:
+            if col in df_db.columns:
+                df_db[col] = df_db[col].apply(
+                    lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() != '' else x
+                )
+        
+        # Also clean room_number
+        if "room_number" in df_db.columns:
+            df_db["room_number"] = df_db["room_number"].apply(
+                lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() != '' else x
+            )
+
         return df_db
+
 
     def import_arrivals_file(self, path: str) -> int:
         try:
@@ -252,24 +324,76 @@ class FrontOfficeDB:
         return total
 
     def get_arrivals_for_date(self, d: date):
+        """Get arrivals for a date, excluding those already checked in"""
         with closing(self._get_conn()) as conn:
             c = conn.cursor()
             c.execute("""
-            SELECT * FROM reservations
-            WHERE arrival_date = ?
-            ORDER BY COALESCE(room_number, '') ASC, guest_name ASC
+            SELECT r.* FROM reservations r
+            WHERE r.arrival_date = ?
+            AND NOT EXISTS (
+                SELECT 1 FROM stays s 
+                WHERE s.reservation_id = r.id 
+                AND s.status = 'CHECKED_IN'
+            )
+            ORDER BY COALESCE(r.room_number, '') ASC, r.guest_name ASC
             """, (d.isoformat(),))
             return c.fetchall()
 
+
     def update_reservation_room(self, res_id: int, room_number: str):
-        rn = room_number.strip() if room_number else None
+        """Update room assignment with validation"""
+        if not room_number or not room_number.strip():
+            return False, "Room number cannot be empty"
+        
+        # Validate and normalize room number
+        is_valid, result = self.is_valid_room_number(room_number)
+        if not is_valid:
+            return False, result
+        
+        rn_str = result  # This is the normalized room number
+        
+        # Get reservation details for conflict checking
+        with closing(self._get_conn()) as conn:
+            c = conn.cursor()
+            c.execute("SELECT arrival_date, depart_date FROM reservations WHERE id = ?", (res_id,))
+            res = c.fetchone()
+            if not res:
+                return False, "Reservation not found"
+            
+            arr = datetime.strptime(res["arrival_date"], "%Y-%m-%d").date()
+            dep = datetime.strptime(res["depart_date"], "%Y-%m-%d").date()
+        
+        # Check if room is already occupied during this period
+        available, msg = self.check_room_available_for_assignment(rn_str, arr, dep, res_id)
+        if not available:
+            return False, msg
+        
+        # Update room assignment
         with closing(self._get_conn()) as conn, conn:
             c = conn.cursor()
             c.execute("""
             UPDATE reservations
             SET room_number = ?, updated_at = datetime('now')
             WHERE id = ?
-            """, (rn, res_id))
+            """, (rn_str, res_id))
+        
+        return True, f"Room {rn_str} assigned successfully"
+
+    
+    def get_checked_out_for_date(self, d: date):
+        """Get all stays that were checked out on this specific date"""
+        with closing(self._get_conn()) as conn:
+            c = conn.cursor()
+            c.execute("""
+            SELECT s.*, r.guest_name, r.reservation_no
+            FROM stays s
+            JOIN reservations r ON r.id = s.reservation_id
+            WHERE s.status = 'CHECKED_OUT'
+            AND DATE(s.checkout_actual) = DATE(?)
+            ORDER BY CAST(s.room_number AS INTEGER)
+            """, (d.isoformat(),))
+            return c.fetchall()
+
 
     # ---- rooms / stays ----
 
@@ -297,6 +421,8 @@ class FrontOfficeDB:
             return c.fetchall()
 
     def checkin_reservation(self, res_id: int):
+        
+        
         with closing(self._get_conn()) as conn, conn:
             c = conn.cursor()
             c.execute("SELECT * FROM reservations WHERE id = ?", (res_id,))
@@ -308,11 +434,21 @@ class FrontOfficeDB:
             if not room:
                 return False, "Assign a room first"
 
-            rn = room.strip()
+            # Validate room number is in valid ranges
+            is_valid, result = self.is_valid_room_number(room)
+            if not is_valid:
+                return False, result
+            
+            rn = result  # Normalized room number
             self.ensure_room_exists(rn)
 
             arr = datetime.strptime(res["arrival_date"], "%Y-%m-%d").date()
             dep = datetime.strptime(res["depart_date"], "%Y-%m-%d").date()
+
+            # Check if arrival date is in the past
+            today = date.today()
+            if arr < today:
+                return False, f"Cannot check in for past date ({arr}). Arrival was on {arr}"
 
             conflicts = self.check_room_conflict(rn, arr)
             if conflicts:
@@ -321,13 +457,14 @@ class FrontOfficeDB:
 
             c.execute("""
             INSERT INTO stays (reservation_id, room_number, status,
-                               checkin_planned, checkout_planned,
-                               checkin_actual)
+                            checkin_planned, checkout_planned,
+                            checkin_actual)
             VALUES (?, ?, 'CHECKED_IN', ?, ?, datetime('now'))
             """, (res_id, rn, arr.isoformat(), dep.isoformat()))
 
             c.execute("UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = ?", (rn,))
-            return True, "Checked in"
+            return True, "Checked in successfully"
+
 
     def get_inhouse(self):
         with closing(self._get_conn()) as conn:
@@ -523,42 +660,42 @@ class FrontOfficeDB:
             return pd.read_sql_query(f"SELECT * FROM {name}", conn)
 
 
-    # def export_arrivals_excel(self, d: date):
-    #     rows = self.get_arrivals_for_date(d)
-    #     if not rows:
-    #         return None
-    #     df = pd.DataFrame([dict(r) for r in rows])
-    #     preferred_order = [
-    #         "amount_pending", "arrival_date", "room_number", "room_type_code",
-    #         "adults", "total_guests", "reservation_no", "voucher",
-    #         "related_reservation", "crs_code", "crs_name", "guest_id_raw",
-    #         "guest_name", "vip_flag", "client_id", "main_client", "nights",
-    #         "depart_date", "meal_plan", "rate_code", "channel",
-    #         "cancellation_policy", "main_remark", "contact_name",
-    #         "contact_phone", "contact_email", "total_remarks",
-    #         "source_of_business", "stay_option_desc", "remarks_by_chain"
-    #     ]
-    #     cols = [c for c in preferred_order if c in df.columns] + [
-    #         c for c in df.columns if c not in preferred_order
-    #     ]
-    #     df = df[cols]
-    #     output = BytesIO()
-    #     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    #         df.to_excel(writer, index=False, sheet_name="Arrivals")
-    #     output.seek(0)
-    #     return output
+    def export_arrivals_excel(self, d: date):
+        rows = self.get_arrivals_for_date(d)
+        if not rows:
+            return None
+        df = pd.DataFrame([dict(r) for r in rows])
+        preferred_order = [
+            "amount_pending", "arrival_date", "room_number", "room_type_code",
+            "adults", "total_guests", "reservation_no", "voucher",
+            "related_reservation", "crs_code", "crs_name", "guest_id_raw",
+            "guest_name", "vip_flag", "client_id", "main_client", "nights",
+            "depart_date", "meal_plan", "rate_code", "channel",
+            "cancellation_policy", "main_remark", "contact_name",
+            "contact_phone", "contact_email", "total_remarks",
+            "source_of_business", "stay_option_desc", "remarks_by_chain"
+        ]
+        cols = [c for c in preferred_order if c in df.columns] + [
+            c for c in df.columns if c not in preferred_order
+        ]
+        df = df[cols]
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Arrivals")
+        output.seek(0)
+        return output
 
-    # def export_inhouse_excel(self, d: date):
-    #     inhouse_rows = self.get_inhouse()
-    #     dep_rows = self.get_departures_for_date(d)
-    #     df_inhouse = pd.DataFrame([dict(r) for r in inhouse_rows]) if inhouse_rows else pd.DataFrame()
-    #     df_dep = pd.DataFrame([dict(r) for r in dep_rows]) if dep_rows else pd.DataFrame()
-    #     output = BytesIO()
-    #     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    #         df_inhouse.to_excel(writer, index=False, sheet_name="InHouse")
-    #         df_dep.to_excel(writer, index=False, sheet_name="Departures")
-    #     output.seek(0)
-    #     return output
+    def export_inhouse_excel(self, d: date):
+        inhouse_rows = self.get_inhouse()
+        dep_rows = self.get_departures_for_date(d)
+        df_inhouse = pd.DataFrame([dict(r) for r in inhouse_rows]) if inhouse_rows else pd.DataFrame()
+        df_dep = pd.DataFrame([dict(r) for r in dep_rows]) if dep_rows else pd.DataFrame()
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df_inhouse.to_excel(writer, index=False, sheet_name="InHouse")
+            df_dep.to_excel(writer, index=False, sheet_name="Departures")
+        output.seek(0)
+        return output
 
 
 # =========================
@@ -569,6 +706,7 @@ db = FrontOfficeDB(DB_PATH)
 
 
 def page_arrivals():
+    
     st.header("Arrivals")
     d = st.date_input("Arrival date", value=date.today(), key="arrivals_date")
 
@@ -583,43 +721,62 @@ def page_arrivals():
         st.info("No arrivals for this date.")
         return
 
-    st.subheader("Arrivals list")
-    for r in rows:
-        with st.expander(f"{r['guest_name']} – Res {r['reservation_no']}"):
+    st.subheader(f"Arrivals list ({len(rows)} reservations)")
+    
+    for idx, r in enumerate(rows, 1):
+        with st.expander(f"{idx} - {r['guest_name']} – Res {r['reservation_no']}", expanded=True):
             col1, col2, col3 = st.columns(3)
-            col1.write(f"Room type: {r['room_type_code']}")
-            col2.write(f"Channel: {r['channel']}")
-            col3.write(f"Rate: {r['rate_code']}")
+            col1.write(f"**Room type:** {r['room_type_code']}")
+            col2.write(f"**Channel:** {r['channel']}")
+            col3.write(f"**Rate:** {r['rate_code']}")
 
-            st.write(r["main_remark"] or "")
+            if r["main_remark"]:
+                st.info(r["main_remark"])
             if r["total_remarks"]:
-                st.write(r["total_remarks"])
+                st.caption(r["total_remarks"])
 
             current_room = r["room_number"] or ""
-            room = st.text_input("Room", value=current_room, key=f"room_{r['id']}")
-            if st.button("Save room", key=f"save_room_{r['id']}"):
-                db.update_reservation_room(r["id"], room)
-                st.success(f"Room {room} saved.")
+            room = st.text_input("Room Number", value=current_room, key=f"room_{r['id']}", 
+                                placeholder="Enter room number")
+            
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                if st.button("Save Room", key=f"save_{r['id']}", type="primary", use_container_width=True):
+                    if room and room.strip():
+                        success, msg = db.update_reservation_room(r["id"], room)
+                        if success:
+                            st.success(msg)  # Show inline, no rerun
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("Please enter a room number")
 
-            if st.button("Check-in", key=f"checkin_{r['id']}"):
-                success, msg = db.checkin_reservation(r["id"])
-                if success:
-                    st.success(msg)
-                else:
-                    st.error(msg)
+            with col_btn2:
+                if st.button("Check-in", key=f"checkin_{r['id']}", type="secondary", use_container_width=True):
+                    success, msg = db.checkin_reservation(r["id"])
+                    if success:
+                        st.success(msg)
+                        st.rerun()  # Only rerun on check-in
+                    else:
+                        st.error(msg)
 
-    # st.subheader("Export")
-    # excel_bytes = db.export_arrivals_excel(d)
-    # if excel_bytes:
-    #     st.download_button(
-    #         "Download Arrivals Excel",
-    #         data=excel_bytes,
-    #         file_name=f"Arrivals-{d.isoformat()}.xlsx",
-    #         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    #     )
+
+
+    st.subheader("Export")
+    excel_bytes = db.export_arrivals_excel(d)
+    if excel_bytes:
+        st.download_button(
+            "Download Arrivals Excel",
+            data=excel_bytes,
+            file_name=f"Arrivals-{d.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 
 
 def page_inhouse():
+    
     st.header("In House & Departures")
     today = st.date_input("Date", value=date.today(), key="inhouse_date")
 
@@ -635,60 +792,83 @@ def page_inhouse():
         for col in display_cols:
             if col not in df_inhouse.columns:
                 df_inhouse[col] = ""
-        st.dataframe(df_inhouse[display_cols])
+        
+        # Add row numbers starting from 1
+        df_display = df_inhouse[display_cols].copy()
+        df_display.insert(0, '#', range(1, len(df_display) + 1))
+        st.dataframe(df_display, use_container_width=True)
 
         st.subheader("Quick checkout")
-        for _, row in df_inhouse.iterrows():
+        for idx, (_, row) in enumerate(df_inhouse.iterrows(), 1):
             col1, col2 = st.columns([3, 1])
-            col1.write(f"Room {row['room_number']} – {row['guest_name']} (Dep {row['checkout_planned']})")
+            col1.write(f"{idx} - Room {row['room_number']} – {row['guest_name']} (Dep {row['checkout_planned']})")
             if col2.button("Check-out", key=f"co_{row['id']}"):
                 success, msg = db.checkout_stay(int(row["id"]))
                 if success:
                     st.success(msg)
+                    st.rerun()
                 else:
                     st.error(msg)
 
-    st.subheader("Today’s Check-out list")
-    dep_rows = db.get_departures_for_date(today)
-    df_dep = pd.DataFrame([dict(r) for r in dep_rows]) if dep_rows else pd.DataFrame()
-    if df_dep.empty:
-        st.info("No departures for this date.")
+    # Already checked out for this date (Fix #4)
+    st.subheader(f"Already checked out on {today}")
+    checkout_rows = db.get_checked_out_for_date(today)
+    df_checkout = pd.DataFrame([dict(r) for r in checkout_rows]) if checkout_rows else pd.DataFrame()
+    if df_checkout.empty:
+        st.info("No check-outs recorded for this date.")
     else:
-        st.dataframe(df_dep[["guest_name", "room_number", "checkout_planned", "status"]])
+        checkout_cols = ["guest_name", "room_number", "checkout_planned", "checkout_actual"]
+        for col in checkout_cols:
+            if col not in df_checkout.columns:
+                df_checkout[col] = ""
+        df_checkout_display = df_checkout[checkout_cols].copy()
+        df_checkout_display.insert(0, '#', range(1, len(df_checkout_display) + 1))
+        st.dataframe(df_checkout_display, use_container_width=True)
 
-    # st.subheader("Export In-House/Departures")
-    # inhouse_bytes = db.export_inhouse_excel(today)
-    # if inhouse_bytes:
-    #     st.download_button(
-    #         "Download In-House & Departures Excel",
-    #         data=inhouse_bytes,
-    #         file_name=f"InHouse-{today.isoformat()}.xlsx",
-    #         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    #     )
+    st.subheader("Export In-House/Checkouts")
+    inhouse_bytes = db.export_inhouse_excel(today)
+    if inhouse_bytes:
+        st.download_button(
+            "Download In-House & Checkouts Excel",
+            data=inhouse_bytes,
+            file_name=f"InHouse-{today.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+    st.subheader("Export In-House/Checkouts")
+    inhouse_bytes = db.export_inhouse_excel(today)
+    if inhouse_bytes:
+        st.download_button(
+            "Download In-House & Checkouts Excel",
+            data=inhouse_bytes,
+            file_name=f"InHouse-{today.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 def page_tasks_handover():
-    st.header("Tasks & Handover")
+    st.header("Handover")
     d = st.date_input("Date", value=date.today(), key="tasks_date")
 
-    st.subheader("Add task / handover item")
+    st.subheader("Add task")
     col1, col2 = st.columns(2)
     title = col1.text_input("Task")
     created_by = col2.text_input("By")
     assigned_to = col1.text_input("To")
     comment = col2.text_input("Comment")
-    if st.button("Add task"):
+    if st.button("Add Handover"):
         if title:
             db.add_task(d, title, created_by, assigned_to, comment)
-            st.success("Task added.")
+            st.success("Handover added.")
         else:
-            st.error("Task title required.")
+            st.error("Handover title required.")
 
-    st.subheader("Tasks for this date")
+    st.subheader("Handover for this date")
     rows = db.get_tasks_for_date(d)
     df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
     if df.empty:
-        st.info("No tasks.")
+        st.info("No Handovers.")
     else:
         st.dataframe(df[["task_date", "title", "created_by", "assigned_to", "comment"]])
 
@@ -888,12 +1068,12 @@ def main():
             "Navigate",
             [
                 "Arrivals",
-                "In-House & Departures",
+                "In-House & Check-outs",
                 "Search",
-                "Tasks & Handover",
+                "Handover",
                 "No Shows",
                 "Room list",
-                "Spare rooms",
+                "Spare Twin rooms",
                 "Parking",
                 "DB Viewer",
             ],
@@ -903,17 +1083,17 @@ def main():
 
     if page == "Arrivals":
         page_arrivals()
-    elif page == "In-House & Departures":
+    elif page == "In-House & Check-outs":
         page_inhouse()
     elif page == "Search":
         page_search()
-    elif page == "Tasks & Handover":
+    elif page == "Handover":
         page_tasks_handover()
     elif page == "No Shows":
         page_no_shows()
     elif page == "Room list":
         page_room_list()
-    elif page == "Spare rooms":
+    elif page == "Spare Twin rooms":
         page_spare_rooms()
     elif page == "Parking":
         page_parking()
