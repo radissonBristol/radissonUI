@@ -50,8 +50,8 @@ class FrontOfficeDB:
     def __init__(self):
            self.engine = create_engine(DATABASE_URL, poolclass=NullPool)
            self._init_db()
-           if self.reservations_empty():
-               self.import_all_arrivals_from_fs()
+           # if self.reservations_empty():
+           #     self.import_all_arrivals_from_fs()
            self.seed_rooms_from_blocks()
            self.sync_room_status_from_stays()
 
@@ -342,50 +342,37 @@ class FrontOfficeDB:
 
     def _build_reservations_from_df(self, df: pd.DataFrame):
            df.columns = [str(c).strip() for c in df.columns]
-           col_map = {
-               "Amount Pending": "amount_pending", "Arrival Date": "arrival_date", "Room": "room_number",
-               "Room type": "room_type_code", "AD": "adults", "Tot. guests": "total_guests",
-               "Reservation No.": "reservation_no", "Voucher": "voucher", "Related reservat": "related_reservation",
-               "CRS": "crs_code", "CRS Name": "crs_name", "Guest ID": "guest_id_raw",
-               "Guest or Group's name": "guest_name", "VIP": "vip_flag", "client Id.": "client_id",
-               "Main client": "main_client", "Nights": "nights", "Depart": "depart_date",
-               "Meal Plan": "meal_plan", "Rate": "rate_code", "Chanl": "channel",
-               "Cancellation Penalty": "cancellation_policy", "Main Rem.": "main_remark",
-               "Contact person": "contact_name", "Contact Telephone No": "contact_phone",
-               "E-mail": "contact_email", "Total Remarks": "total_remarks",
-               "Source of Business": "source_of_business", "Stay Options Detail and Remarks": "stay_option_desc",
-               "Remarks by Hotel Chain": "remarks_by_chain"
-           }
-           df_db = pd.DataFrame()
-           for src, dest in col_map.items():
-               df_db[dest] = df[src] if src in df.columns else None
            
-           df_db["children"] = 0
-           df_db["company_name"] = df_db["company_id_raw"] = df_db["country"] = None
-           
-           # FIX: Handle dates properly - convert NaT to None
-           for col in ["arrival_date", "depart_date"]:
-               df_db[col] = pd.to_datetime(df_db[col], errors="coerce")
-               # Replace NaT with None for PostgreSQL
-               df_db[col] = df_db[col].where(pd.notna(df_db[col]), None)
-           
-           # FIX: Only clean NUMERIC fields, leave alphanumeric as-is
-           for col in ["reservation_no", "voucher", "guest_id_raw", "client_id", "company_id_raw", "reservation_group_id"]:
-               if col in df_db.columns:
-                   df_db[col] = df_db[col].apply(lambda x: 
-                       str(int(float(x))) if pd.notna(x) and str(x).replace('.','').replace('-','').isdigit() else str(x) if pd.notna(x) else None
-                   )
-           
-           # FIX: Room number - only clean if numeric
-           if "room_number" in df_db.columns:
-               df_db["room_number"] = df_db["room_number"].apply(lambda x: 
-                   str(int(float(x))) if pd.notna(x) and str(x).replace('.','').isdigit() else str(x) if pd.notna(x) else None
-               )
+           # Simple mapping - keep everything as strings initially
+           df_clean = pd.DataFrame({
+               "arrival_date": pd.to_datetime(df.get("Arrival Date"), errors='coerce'),
+               "depart_date": pd.to_datetime(df.get("Depart"), errors='coerce'),
+               "room_number": df.get("Room"),
+               "room_type_code": df.get("Room type"),
+               "adults": pd.to_numeric(df.get("AD"), errors='coerce').fillna(1).astype(int),
+               "children": 0,
+               "total_guests": pd.to_numeric(df.get("Tot. guests"), errors='coerce').fillna(1).astype(int),
+               "reservation_no": df.get("Reservation No.").astype(str),
+               "voucher": df.get("Voucher").astype(str) if "Voucher" in df.columns else None,
+               "guest_name": df.get("Guest or Group's name"),
+               "main_client": df.get("Main client"),
+               "nights": pd.to_numeric(df.get("Nights"), errors='coerce'),
+               "meal_plan": df.get("Meal Plan"),
+               "rate_code": df.get("Rate"),
+               "channel": df.get("Chanl"),
+               "main_remark": df.get("Main Rem."),
+               "contact_name": df.get("Contact person"),
+               "contact_email": df.get("E-mail"),
+               "source_of_business": df.get("Source of Business"),
+           })
            
            # Drop rows with invalid dates
-           df_db = df_db.dropna(subset=["arrival_date", "depart_date"])
+           df_clean = df_clean.dropna(subset=["arrival_date", "depart_date"])
            
-           return df_db
+           # Replace remaining NaT/NaN with None
+           df_clean = df_clean.where(pd.notna(df_clean), None)
+           
+           return df_clean
 
 
 
