@@ -9,7 +9,7 @@ import sqlite3
 import streamlit as st
 
 
-TEST_MODE = False  # set False for live system
+TEST_MODE = True  # set False for live system
 
 if TEST_MODE:
     DB_PATH = "hotel_fo_TEST.db"
