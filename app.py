@@ -631,8 +631,8 @@ class FrontOfficeDB:
 
             # Check if arrival date is in the past
             today = date.today()
-            if arr < today:
-                return False, f"Cannot check in for past date ({arr}). Arrival was on {arr}"
+            # if arr < today:
+            #     return False, f"Cannot check in for past date ({arr}). Arrival was on {arr}"
 
             conflicts = self.check_room_conflict(rn, arr)
             if conflicts:
