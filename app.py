@@ -1375,13 +1375,21 @@ def main():
     
     # Initialize database here (after set_page_config)
     global db
-    if db is None:
-        db = FrontOfficeDB()
+    @st.cache_resource
+    def get_db():
+        return FrontOfficeDB()
+
+    db = get_db()
+
 
 
     with st.sidebar:
         st.title("Front Office Hub")
+<<<<<<< Updated upstream
         mode = "NEW TEST MODE"
+=======
+        mode = "TEST MODE"
+>>>>>>> Stashed changes
         st.markdown(f"**{mode}**")
         page = st.radio(
     "Navigate",
