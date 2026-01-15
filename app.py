@@ -65,14 +65,15 @@ class FrontOfficeDB:
             max_overflow=10,
             pool_pre_ping=True
         )
+
+    def bootstrap(self):
         self._init_db()
-        
-        # RE-ENABLE THIS:
         if self.reservations_empty():
             self.import_all_arrivals_from_fs()
-        
         self.seed_rooms_from_blocks()
         self.sync_room_status_from_stays()
+
+
 
     def get_potential_no_shows(self, d: date):
         """Get arrivals who didn't check in (potential no-shows)"""
@@ -795,7 +796,7 @@ class FrontOfficeDB:
 
     def export_inhouse_excel(self, d: date):
         inhouse_rows = self.get_inhouse()
-        dep_rows = self.get_departures_for_date(d)
+        dep_rows = cached_departures_for_date(d)
         df_inhouse = pd.DataFrame([dict(r) for r in inhouse_rows]) if inhouse_rows else pd.DataFrame()
         df_dep = pd.DataFrame([dict(r) for r in dep_rows]) if dep_rows else pd.DataFrame()
         output = BytesIO()
@@ -804,6 +805,26 @@ class FrontOfficeDB:
             df_dep.to_excel(writer, index=False, sheet_name="Departures")
         output.seek(0)
         return output
+
+@st.cache_data(show_spinner=False)
+def cached_arrivals_for_date(d: date):
+    return db.get_arrivals_for_date(d)
+
+@st.cache_data(show_spinner=False)
+def cached_inhouse_for_date(d: date):
+    return db.get_inhouse(d)
+
+@st.cache_data(show_spinner=False)
+def cached_departures_for_date(d: date):
+    return db.get_departures_for_date(d)
+
+@st.cache_data(show_spinner=False)
+def cached_breakfast_for_date(d: date):
+    return db.get_breakfast_list_for_date(d)
+
+@st.cache_data(show_spinner=False)
+def cached_parking_for_date(d: date):
+    return db.get_parking_overview_for_date(d)
 
 
 # =========================
@@ -818,7 +839,8 @@ def page_breakfast():
     st.header("Breakfast List")
     today = st.date_input("Date", value=date.today(), key="breakfast_date")
     
-    breakfast_rows = db.get_breakfast_list_for_date(today)
+    breakfast_rows = cached_breakfast_for_date(today)
+
     
     if not breakfast_rows:
         st.info("No guests with breakfast for this date.")
@@ -884,7 +906,7 @@ def page_arrivals():
     st.header("Arrivals")
     d = st.date_input("Arrival date", value=date.today(), key="arrivals_date")
     
-    rows = db.get_arrivals_for_date(d)
+    rows = cached_arrivals_for_date(d)
     if not rows:
         st.info("No arrivals for this date.")
         return
@@ -947,7 +969,8 @@ def page_inhouse_list():
     today = st.date_input("Date", value=date.today(), key="inhouse_list_date")
     
     st.subheader(f"Guests in hotel on {today.strftime('%d %B %Y')}")
-    inhouse_rows = db.get_inhouse(today)
+    inhouse_rows = cached_inhouse_for_date(today)
+
     
     if not inhouse_rows:
         st.info("No guests scheduled for this date.")
@@ -1224,7 +1247,8 @@ def page_parking():
     st.header("Parking Overview")
     today = st.date_input("Date", value=date.today(), key="parking_date")
     
-    inhouse = db.get_inhouse(today)
+    inhouse = cached_parking_for_date(today)
+
     
     if not inhouse:
         st.info("No in-house guests for this date.")
@@ -1377,7 +1401,10 @@ def main():
     global db
     @st.cache_resource
     def get_db():
-        return FrontOfficeDB()
+        db = FrontOfficeDB()
+        db.bootstrap()
+        return db
+
 
     db = get_db()
 
