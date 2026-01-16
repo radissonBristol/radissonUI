@@ -886,8 +886,8 @@ class FrontOfficeDB:
     def get_tasks_for_date(self, d: date):
         return self.fetch_all("SELECT * FROM tasks WHERE task_date = :date ORDER BY created_at", {"date": d})
     
-    def add_no_show(self, arrival_date: date, guest_name: str, main_client: str,
-                amount_charged: float, comment: str):
+    def add_no_show(self, arrival_date: date, guest_name: str, main_client: str, charged: bool, 
+                amount_charged: float, amount_pending: float, comment: str):
         # Check if already exists
         existing = self.fetch_one("""
             SELECT id FROM no_shows 
@@ -901,12 +901,16 @@ class FrontOfficeDB:
                 UPDATE no_shows SET
                     main_client = ?,
                     charged = ?,
+                    amount_charged = ?,
+                    amount_pending = ?,
                     comment = ?
                 WHERE id = ?
                 """,
                 (
                     main_client,
+                    int(charged),
                     amount_charged or 0,
+                    amount_pending or 0,
                     comment,
                     existing["id"],
                 ),
@@ -915,14 +919,16 @@ class FrontOfficeDB:
         else:
             # Insert new
             self.execute("""
-                 INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, 
-                                      comment)
-                VALUES (:date, :guest, :client, :amount_charged, :comment)
+                INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, 
+                                    amount_charged, amount_pending, comment)
+                VALUES (:date, :guest, :client, :charged, :amt_charged, :amt_pending, :comment)
             """, {
                 "date": arrival_date,
                 "guest": guest_name,
                 "client": main_client,
-                "charged": amount_charged or 0,
+                "charged": int(charged),
+                "amt_charged": amount_charged or 0,
+                "amt_pending": amount_pending or 0,
                 "comment": comment
             })
 
@@ -1409,14 +1415,14 @@ def page_no_shows():
         amount_charged = col1.number_input("Amount Charged (£)", min_value=0.0, step=0.01, format="%.2f")
         amount_pending = col2.number_input("Amount Pending (£)", min_value=0.0, step=0.01, format="%.2f")
         
-        # charged = st.checkbox("Payment Received")
+        charged = st.checkbox("Payment Received")
         comment = st.text_area("Comment")
         
         submitted = st.form_submit_button("Add No-Show", type="primary", use_container_width=True)
         
         if submitted and guest_name:
             # Add to database
-            db.add_no_show(d, guest_name, main_client, amount_charged, comment)
+            db.add_no_show(d, guest_name, main_client, charged, amount_charged, amount_pending, comment)
             st.success(f"✓ No-show added: {guest_name}")
     
     st.divider()
@@ -1430,6 +1436,8 @@ def page_no_shows():
             "Guest": r["guest_name"],
             "Client": r["main_client"] if r.get("main_client") else "",
             "Charged": f"£{float(r['amount_charged']):.2f}" if r.get('amount_charged') is not None else "£0.00",
+            "Pending": f"£{float(r['amount_pending']):.2f}" if r.get('amount_pending') is not None else "£0.00",
+            "Paid": "✓" if r["charged"] else "✗",
             "Comment": r.get("comment", "")
         } for r in rows])
         
