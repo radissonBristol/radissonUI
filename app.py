@@ -915,7 +915,7 @@ class FrontOfficeDB:
         else:
             # Insert new
             self.execute("""
-                 INSERT INTO no_shows (arrival_date, guest_name, main_client, amount_charged, 
+                 INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, 
                                       comment)
                 VALUES (:date, :guest, :client, :amount_charged, :comment)
             """, {
