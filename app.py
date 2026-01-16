@@ -24,6 +24,19 @@ def format_date(date_str):
     except (ValueError, TypeError):
         # Fallback: just remove time if simple string
         return str(date_str).split()[0] if ' ' in str(date_str) else str(date_str)
+    
+def format_room_number(room_number):
+    """Format room number, removing .0 decimals"""
+    if not room_number:
+        return ''
+    try:
+        num = float(room_number)
+        if num.is_integer():
+            return str(int(num))
+        return str(num)
+    except (ValueError, TypeError):
+        return str(room_number)
+
 
 def clean_numeric_columns(df: pd.DataFrame, cols: list):
     """Convert numeric columns to whole numbers for display"""
@@ -266,87 +279,97 @@ class FrontOfficeDB:
         )
 
     def generate_hsk_tasks_for_date(self, target_date: date):
-        tasks = []
-        
-        # 1. Checkouts
+    # 1. Checkouts
         checkouts = self.fetch_all(
-        """
-        SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
-        FROM reservations r
-        WHERE r.depart_date = ?
-        AND r.room_number IS NOT NULL
-        ORDER BY CAST(r.room_number AS INTEGER)
-        """,
-        (target_date.isoformat(),),
-    ) 
+            """
+            SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
+            FROM reservations r
+            LEFT JOIN stays s ON s.reservation_id = r.id
+            WHERE date(r.depart_date) = date(?)
+            AND r.room_number IS NOT NULL
+            AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
+            ORDER BY CAST(r.room_number AS INTEGER)
+            """,
+            (target_date.isoformat(),),
+        )
+
         for co in checkouts:
-            task = {
-                "room": co["room_number"],
-                "task_type": "CHECKOUT",
-                "priority": "HIGH",
-                "description": f"Clean room {co['room_number']} - {co['guest_name']} checkout",
-                "notes": []
-            }
-            remarks = f"{co['main_remark'] or ''} {co['total_remarks'] or ''}".lower()
-            if "2t" in remarks:
-                task["notes"].append("2 TWIN BEDS")
-            if "vip" in remarks or "birthday" in remarks:
-                task["priority"] = "URGENT"
-                task["notes"].append("VIP/SPECIAL")
-            tasks.append(task)
-        
-        # 2. Stayovers - FIX: Remove CAST from ORDER BY
+            remarks = f"{co.get('main_remark') or co.get('total_remarks') or ''}".lower()
+            notes = []
+            if '2t' in remarks:
+                notes.append("2 TWIN BEDS")
+            if 'vip' in remarks or 'birthday' in remarks:
+                notes.append("VIP/SPECIAL")
+            
+            self.execute(
+                """
+                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    target_date.isoformat(),
+                    f"CHECKOUT - Room {co['room_number']} - {co['guest_name']}",
+                    " | ".join(notes) if notes else "",
+                ),
+            )
+
+        # 2. Stayovers
         stayovers = self.fetch_all(
-        """
-        SELECT DISTINCT r.room_number, r.guest_name
-        FROM reservations r
-        WHERE r.arrival_date < ?
-        AND r.depart_date > ?
-        AND r.room_number IS NOT NULL
-        ORDER BY r.room_number
-        """,
-        (target_date.isoformat(), target_date.isoformat()),
-    )
-        
+            """
+            SELECT DISTINCT r.room_number, r.guest_name
+            FROM reservations r
+            WHERE date(r.arrival_date) < date(?)
+            AND date(r.depart_date) > date(?)
+            AND r.room_number IS NOT NULL
+            ORDER BY CAST(r.room_number AS INTEGER)
+            """,
+            (target_date.isoformat(), target_date.isoformat()),
+        )
+
         for so in stayovers:
-            tasks.append({
-                "room": so["room_number"],
-                "task_type": "STAYOVER",
-                "priority": "MEDIUM",
-                "description": f"Refresh room {so['room_number']} - {so['guest_name']} stayover",
-                "notes": []
-            })
-        
+            self.execute(
+                """
+                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    target_date.isoformat(),
+                    f"STAYOVER - Room {so['room_number']} - {so['guest_name']}",
+                    "",
+                ),
+            )
+
         # 3. Arrivals
         arrivals = self.fetch_all(
-        """
-        SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
-        FROM reservations r
-        WHERE r.arrival_date = ?
-        AND r.room_number IS NOT NULL
-        ORDER BY r.room_number
-        """,
-        (target_date.isoformat(),),
-)
+            """
+            SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
+            FROM reservations r
+            WHERE date(r.arrival_date) = date(?)
+            AND r.room_number IS NOT NULL
+            ORDER BY CAST(r.room_number AS INTEGER)
+            """,
+            (target_date.isoformat(),),
+        )
 
-
-        
         for arr in arrivals:
-            task = {
-                "room": arr["room_number"],
-                "task_type": "ARRIVAL",
-                "priority": "HIGH",
-                "description": f"Prepare room {arr['room_number']} for {arr['guest_name']} arrival",
-                "notes": []
-            }
-            remarks = f"{arr['main_remark'] or ''} {arr['total_remarks'] or ''}".lower()
-            if "2t" in remarks:
-                task["notes"].append("2 TWIN BEDS")
-            if "accessible" in remarks or "disabled" in remarks:
-                task["notes"].append("ACCESSIBLE ROOM")
-            tasks.append(task)
-        
-        return tasks
+            remarks = f"{arr.get('main_remark') or arr.get('total_remarks') or ''}".lower()
+            notes = []
+            if '2t' in remarks:
+                notes.append("2 TWIN BEDS")
+            if 'accessible' in remarks or 'disabled' in remarks:
+                notes.append("ACCESSIBLE ROOM")
+            
+            self.execute(
+                """
+                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    target_date.isoformat(),
+                    f"ARRIVAL - Room {arr['room_number']} - {arr['guest_name']}",
+                    " | ".join(notes) if notes else "",
+                ),
+            )
 
     def cancel_checkin(self, stay_id: int):
         stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
@@ -783,13 +806,19 @@ class FrontOfficeDB:
     # ---- parking helpers ----
 
     def get_parking_overview_for_date(self, d: date):
-        return self.fetch_all("""
-            SELECT s.*, r.guest_name FROM stays s
+        return self.fetch_all(
+            """
+            SELECT s.*, r.guest_name
+            FROM stays s
             JOIN reservations r ON r.id = s.reservation_id
-            WHERE s.checkin_planned <= :date AND s.checkout_planned > :date
-              AND (s.parking_space IS NOT NULL OR s.parking_plate IS NOT NULL)
+            WHERE date(s.checkin_planned) <= date(?)
+            AND date(s.checkout_planned) > date(?)
+            AND (s.parking_space IS NOT NULL OR s.parking_plate IS NOT NULL)
             ORDER BY s.parking_space, CAST(s.room_number AS INTEGER)
-        """, {"date": d})
+            """,
+            (d.isoformat(), d.isoformat()),
+        )
+
 
 
     def add_task(self, task_date: date, title: str, created_by: str, assigned_to: str, comment: str):
@@ -873,13 +902,21 @@ class FrontOfficeDB:
         return [r["room_number"] for r in rows]
     
     def search_reservations(self, q: str):
-        like = f"%{q}%"
-        return self.fetch_all("""
+        like_pattern = f"%{q}%"
+        return self.fetch_all(
+            """
             SELECT * FROM reservations
-            WHERE guest_name LIKE :q OR room_number LIKE :q OR reservation_no LIKE :q
-               OR main_client LIKE :q OR channel LIKE :q
-            ORDER BY arrival_date DESC LIMIT 500
-        """, {"q": like})
+            WHERE guest_name LIKE ?
+            OR room_number LIKE ?
+            OR reservation_no LIKE ?
+            OR main_client LIKE ?
+            OR channel LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern, like_pattern, like_pattern, like_pattern, like_pattern),
+        )
+
     
     def read_table(self, name: str):
         from contextlib import closing
@@ -934,7 +971,7 @@ db = None  # Will be initialized in main()
  # Use cached connection
 
 
-def page_breakfast():
+def page_breakfast_list():
     st.header("Breakfast List")
     today = st.date_input("Date", value=date.today(), key="breakfast_date")
     
@@ -976,29 +1013,75 @@ def page_housekeeping():
     st.header("Housekeeping Task List")
     today = st.date_input("Date", value=date.today(), key="hsk_date")
     
-    tasks = db.generate_hsk_tasks_for_date(today)
+    # Get tasks directly from queries
+    checkouts = db.fetch_all(
+        """
+        SELECT r.room_number, r.guest_name, r.main_remark
+        FROM reservations r
+        LEFT JOIN stays s ON s.reservation_id = r.id
+        WHERE date(r.depart_date) = date(?)
+          AND r.room_number IS NOT NULL
+          AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
+        ORDER BY CAST(r.room_number AS INTEGER)
+        """,
+        (today.isoformat(),),
+    )
     
-    if not tasks:
+    stayovers = db.fetch_all(
+        """
+        SELECT DISTINCT r.room_number, r.guest_name
+        FROM reservations r
+        WHERE date(r.arrival_date) < date(?)
+          AND date(r.depart_date) > date(?)
+          AND r.room_number IS NOT NULL
+        ORDER BY CAST(r.room_number AS INTEGER)
+        """,
+        (today.isoformat(), today.isoformat()),
+    )
+    
+    arrivals = db.fetch_all(
+        """
+        SELECT r.room_number, r.guest_name, r.main_remark
+        FROM reservations r
+        WHERE date(r.arrival_date) = date(?)
+          AND r.room_number IS NOT NULL
+        ORDER BY CAST(r.room_number AS INTEGER)
+        """,
+        (today.isoformat(),),
+    )
+    
+    total_tasks = len(checkouts) + len(stayovers) + len(arrivals)
+    
+    if total_tasks == 0:
         st.info("No housekeeping tasks for this date.")
         return
     
-    # Convert to DataFrame
-    df_tasks = pd.DataFrame([
-        {
-            "#": idx,
-            "Room": t["room"],
-            "Type": t["task_type"],
-            "Priority": t["priority"],
-            "Task": t["description"],
-            "Notes": " | ".join(t["notes"]) if t["notes"] else ""
-        }
-        for idx, t in enumerate(tasks, 1)
-    ])
+    st.metric("Total Tasks", total_tasks)
     
-    df_tasks = clean_numeric_columns(df_tasks, ["Room"])
-    st.dataframe(df_tasks, use_container_width=True, hide_index=True)
+    # Checkouts
+    if checkouts:
+        st.subheader(f"🚪 Checkouts ({len(checkouts)})")
+        for idx, co in enumerate(checkouts, 1):
+            st.write(f"{idx}. Room {format_room_number(co['room_number'])} - {co['guest_name']}")
+            if co.get('main_remark'):
+                st.caption(co['main_remark'])
+    
+    # Stayovers
+    if stayovers:
+        st.divider()
+        st.subheader(f"🔄 Stayovers ({len(stayovers)})")
+        for idx, so in enumerate(stayovers, 1):
+            st.write(f"{idx}. Room {format_room_number(so['room_number'])} - {so['guest_name']}")
+    
+    # Arrivals
+    if arrivals:
+        st.divider()
+        st.subheader(f"✈️ Arrivals ({len(arrivals)})")
+        for idx, arr in enumerate(arrivals, 1):
+            st.write(f"{idx}. Room {format_room_number(arr['room_number'])} - {arr['guest_name']}")
+            if arr.get('main_remark'):
+                st.caption(arr['main_remark'])
 
-    st.caption(f"Total: {len(tasks)} tasks ({len([t for t in tasks if t['task_type']=='CHECKOUT'])} checkouts, {len([t for t in tasks if t['task_type']=='STAYOVER'])} stayovers, {len([t for t in tasks if t['task_type']=='ARRIVAL'])} arrivals)")
 
 def page_arrivals():
     st.header("Arrivals")
@@ -1642,33 +1725,25 @@ def page_admin_upload():
                 import pandas as pd
                 
                 with st.spinner("Creating download package..."):
-                    # Create in-memory zip file
                     zip_buffer = io.BytesIO()
                     
                     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                        # 1. Add the database file
+                        # 1. Add database file
                         with open(DBPATH, 'rb') as db_file:
                             zip_file.writestr("hotelfo.db", db_file.read())
                         
-                        # 2. Export all tables to CSV
+                        # 2. Export tables to CSV
                         tables = ['reservations', 'stays', 'rooms', 'no_shows', 'spare_rooms', 'tasks']
                         
                         for table_name in tables:
                             try:
-                                # Get table data
                                 rows = db.fetch_all(f"SELECT * FROM {table_name}")
                                 
                                 if rows:
-                                    # Convert to pandas DataFrame
                                     df = pd.DataFrame([dict(row) for row in rows])
-                                    
-                                    # Convert to CSV string
                                     csv_buffer = io.StringIO()
                                     df.to_csv(csv_buffer, index=False)
-                                    
-                                    # Add to zip
                                     zip_file.writestr(f"{table_name}.csv", csv_buffer.getvalue())
-                                    
                                     st.success(f"✅ Exported {table_name}: {len(rows)} rows")
                                 else:
                                     st.info(f"ℹ️ {table_name}: empty")
@@ -1676,10 +1751,7 @@ def page_admin_upload():
                             except Exception as e:
                                 st.warning(f"⚠️ Could not export {table_name}: {str(e)}")
                     
-                    # Prepare download
                     zip_buffer.seek(0)
-                    
-                    # Generate filename with timestamp
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"hotelfo_backup_{timestamp}.zip"
                     
@@ -1696,6 +1768,7 @@ def page_admin_upload():
             except Exception as e:
                 st.error(f"❌ Error creating download: {str(e)}")
                 st.exception(e)
+
 
 
 def main():
