@@ -199,6 +199,18 @@ class FrontOfficeDB:
                         room_number TEXT
                     )
                 """)
+                c.execute("""
+    CREATE TABLE IF NOT EXISTS hsk_task_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_date TEXT,
+        room_number TEXT,
+        task_type TEXT,
+        status TEXT DEFAULT 'PENDING',
+        notes TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(task_date, room_number, task_type)
+    )
+""")
 
     def __init__(self, dbpath: str):
         self.dbpath = dbpath
@@ -207,6 +219,23 @@ class FrontOfficeDB:
             self.import_all_arrivals_from_fs()
             self.seed_rooms_from_blocks()
             self.sync_room_status_from_stays()
+    def get_hsk_task_status(self, task_date: date, room_number: str, task_type: str):
+        return self.fetch_one(
+            "SELECT status, notes FROM hsk_task_status WHERE task_date = ? AND room_number = ? AND task_type = ?",
+            (task_date.isoformat(), room_number, task_type)
+        )
+
+    def update_hsk_task_status(self, task_date: date, room_number: str, task_type: str, status: str, notes: str = ""):
+        self.execute(
+            """
+            INSERT INTO hsk_task_status (task_date, room_number, task_type, status, notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(task_date, room_number, task_type)
+            DO UPDATE SET status = ?, notes = ?, updated_at = datetime('now')
+            """,
+            (task_date.isoformat(), room_number, task_type, status, notes, status, notes)
+        )
+
 
 
     def get_potential_no_shows(self, d: date):
@@ -286,16 +315,19 @@ class FrontOfficeDB:
         c = conn.cursor()
         
         try:
+            # Use LIKE to match the date portion of timestamp
+            target_str = target_date.isoformat()  # e.g., "2026-08-16"
+            
             # 1. Checkouts
             c.execute("""
                 SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks,
                     s.status
                 FROM reservations r
                 LEFT JOIN stays s ON s.reservation_id = r.id
-                WHERE date(r.depart_date) = date(?)
+                WHERE r.depart_date LIKE ?
                 AND r.room_number IS NOT NULL AND r.room_number != ''
                 ORDER BY CAST(r.room_number AS INTEGER)
-            """, (target_date.isoformat(),))
+            """, (f"{target_str}%",))
             
             checkouts = c.fetchall()
             
@@ -335,10 +367,11 @@ class FrontOfficeDB:
                 FROM stays s
                 JOIN reservations r ON r.id = s.reservation_id
                 WHERE s.status = 'CHECKED_IN'
-                AND date(s.checkin_planned) < date(?)
-                AND date(s.checkout_planned) > date(?)
+                AND s.checkin_planned LIKE ?
+                AND s.checkout_planned LIKE ?
                 ORDER BY CAST(s.room_number AS INTEGER)
-            """, (target_date.isoformat(), target_date.isoformat()))
+            """, (f"%{target_str.split('-')[0]}-{target_str.split('-')[1]}%", 
+                f"%{target_str.split('-')[0]}-{target_str.split('-')[1]}%"))
             
             stayovers = c.fetchall()
             
@@ -356,10 +389,10 @@ class FrontOfficeDB:
             c.execute("""
                 SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
                 FROM reservations r
-                WHERE date(r.arrival_date) = date(?)
+                WHERE r.arrival_date LIKE ?
                 AND r.room_number IS NOT NULL AND r.room_number != ''
                 ORDER BY CAST(r.room_number AS INTEGER)
-            """, (target_date.isoformat(),))
+            """, (f"{target_str}%",))
             
             arrivals = c.fetchall()
             
@@ -388,8 +421,6 @@ class FrontOfficeDB:
             conn.close()
         
         return tasks
-
-
 
 
     def cancel_checkin(self, stay_id: int):
@@ -1039,56 +1070,92 @@ def page_housekeeping():
         st.info("No housekeeping tasks for this date.")
         return
     
-    # 6. Summary metrics at top ✅
-    col1, col2, col3, col4 = st.columns(4)
+    # Get existing statuses and merge with tasks
+    for task in tasks:
+        status_data = db.get_hsk_task_status(today, task["room"], task["tasktype"])
+        if status_data:
+            task["Status"] = status_data["status"]
+            task["HSK Notes"] = status_data["notes"] or ""
+        else:
+            task["Status"] = "PENDING"
+            task["HSK Notes"] = ""
+    
+    # Summary metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Total Tasks", len(tasks))
     col2.metric("Checkouts", len([t for t in tasks if t['tasktype'] == 'CHECKOUT']))
     col3.metric("Stayovers", len([t for t in tasks if t['tasktype'] == 'STAYOVER']))
     col4.metric("Arrivals", len([t for t in tasks if t['tasktype'] == 'ARRIVAL']))
+    completed_count = len([t for t in tasks if t.get('Status') == 'DONE'])
+    col5.metric("✅ Completed", completed_count)
     
-    # 1. Structured task table ✅
+    # Create editable DataFrame
     df_tasks = pd.DataFrame([
         {
             "#": idx,
-            "Room": t["room"],
+            "Room": format_room_number(t["room"]),
             "Type": t["tasktype"],
             "Priority": t["priority"],
             "Task": t["description"],
-            "Notes": " | ".join(t["notes"]) if t["notes"] else ""
+            "Notes": " | ".join(t["notes"]) if t["notes"] else "",
+            "Status": t["Status"],
+            "HSK Notes": t["HSK Notes"]
         }
         for idx, t in enumerate(tasks, 1)
     ])
     
-    # 3. Priority color indicators ✅
-    def highlight_priority(row):
-        if row['Priority'] == 'URGENT':
-            return ['background-color: #ffcccc'] * len(row)  # Red
-        elif row['Priority'] == 'HIGH':
-            return ['background-color: #fff4cc'] * len(row)  # Yellow
-        else:
-            return [''] * len(row)  # No color for MEDIUM
-    
-    st.dataframe(
-        df_tasks.style.apply(highlight_priority, axis=1),
+    # Display editable table
+    st.subheader("Task Tracking")
+    edited_df = st.data_editor(
+        df_tasks,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        disabled=["#", "Room", "Type", "Priority", "Task", "Notes"],  # Only Status and HSK Notes are editable
+        column_config={
+            "Status": st.column_config.SelectboxColumn(
+                "Status",
+                options=["PENDING", "DONE"],
+                required=True
+            ),
+            "HSK Notes": st.column_config.TextColumn(
+                "HSK Notes",
+                help="Add notes here (e.g., 'Cleaned', 'Extra towels needed')",
+                max_chars=200
+            )
+        }
     )
     
-    # 2. CSV download ✅
-    csv = df_tasks.to_csv(index=False)
+    # Save button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("💾 Save All Changes", type="primary", use_container_width=True):
+            # Save each task status
+            for idx, row in edited_df.iterrows():
+                original_task = tasks[idx]
+                db.update_hsk_task_status(
+                    today,
+                    original_task["room"],
+                    original_task["tasktype"],
+                    row["Status"],
+                    row["HSK Notes"]
+                )
+            st.success("✅ All changes saved!")
+            st.rerun()
+    
+    # Download CSV
+    csv = edited_df.to_csv(index=False)
     st.download_button(
-        label="📥 Download HSK List as CSV",
+        label="📥 Download HSK List",
         data=csv,
         file_name=f"HSK_{today.strftime('%Y%m%d')}.csv",
         mime="text/csv",
         use_container_width=True
     )
     
-    st.caption(f"Total: {len(tasks)} tasks | "
-               f"{len([t for t in tasks if t['tasktype']=='CHECKOUT'])} checkouts, "
-               f"{len([t for t in tasks if t['tasktype']=='STAYOVER'])} stayovers, "
-               f"{len([t for t in tasks if t['tasktype']=='ARRIVAL'])} arrivals")
-
+    # Summary
+    pending = len(edited_df[edited_df["Status"] == "PENDING"])
+    completed = len(edited_df[edited_df["Status"] == "DONE"])
+    st.caption(f"Total: {len(tasks)} tasks | ✅ Completed: {completed} | ⏳ Pending: {pending}")
 
 
 def page_arrivals():
