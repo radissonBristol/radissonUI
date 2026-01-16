@@ -926,7 +926,7 @@ class FrontOfficeDB:
                 "date": arrival_date,
                 "guest": guest_name,
                 "client": main_client,
-                "charged": amount_charged or 0,
+                "amt_charged": amount_charged or 0,
                 "comment": comment
             })
 
