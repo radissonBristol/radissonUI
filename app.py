@@ -701,7 +701,7 @@ class FrontOfficeDB:
         JOIN reservations r ON r.id = s.reservation_id
         WHERE s.status = 'CHECKED_IN'
         AND date(s.checkin_planned) <= date(?)
-        AND date(s.checkout_planned) > date(?)
+        AND date(s.checkout_planned) = date(?)
         ORDER BY s.room_number
         """,
         (target_date.isoformat(), target_date.isoformat()),
