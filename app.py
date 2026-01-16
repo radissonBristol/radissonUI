@@ -282,7 +282,7 @@ class FrontOfficeDB:
         """Auto-generate housekeeping tasks for the day"""
         tasks = []
         
-        with closing(self._get_conn()) as conn:
+        with closing(self.get_conn()) as conn:
             c = conn.cursor()
             
             # 1. Get all checkouts for today
@@ -1021,74 +1021,30 @@ def page_housekeeping():
     st.header("Housekeeping Task List")
     today = st.date_input("Date", value=date.today(), key="hsk_date")
     
-    # Get tasks directly from queries
-    checkouts = db.fetch_all(
-        """
-        SELECT r.room_number, r.guest_name, r.main_remark
-        FROM reservations r
-        LEFT JOIN stays s ON s.reservation_id = r.id
-        WHERE date(r.depart_date) = date(?)
-          AND r.room_number IS NOT NULL
-          AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
-        ORDER BY CAST(r.room_number AS INTEGER)
-        """,
-        (today.isoformat(),),
-    )
+    tasks = db.generate_hsk_tasks_for_date(today)
     
-    stayovers = db.fetch_all(
-        """
-        SELECT DISTINCT r.room_number, r.guest_name
-        FROM reservations r
-        WHERE date(r.arrival_date) < date(?)
-          AND date(r.depart_date) > date(?)
-          AND r.room_number IS NOT NULL
-        ORDER BY CAST(r.room_number AS INTEGER)
-        """,
-        (today.isoformat(), today.isoformat()),
-    )
-    
-    arrivals = db.fetch_all(
-        """
-        SELECT r.room_number, r.guest_name, r.main_remark
-        FROM reservations r
-        WHERE date(r.arrival_date) = date(?)
-          AND r.room_number IS NOT NULL
-        ORDER BY CAST(r.room_number AS INTEGER)
-        """,
-        (today.isoformat(),),
-    )
-    
-    total_tasks = len(checkouts) + len(stayovers) + len(arrivals)
-    
-    if total_tasks == 0:
+    if not tasks:
         st.info("No housekeeping tasks for this date.")
         return
     
-    st.metric("Total Tasks", total_tasks)
+    # Convert to DataFrame
+    df_tasks = pd.DataFrame([
+        {
+            "#": idx,
+            "Room": t["room"],
+            "Type": t["task_type"],
+            "Priority": t["priority"],
+            "Task": t["description"],
+            "Notes": " | ".join(t["notes"]) if t["notes"] else ""
+        }
+        for idx, t in enumerate(tasks, 1)
+    ])
     
-    # Checkouts
-    if checkouts:
-        st.subheader(f"🚪 Checkouts ({len(checkouts)})")
-        for idx, co in enumerate(checkouts, 1):
-            st.write(f"{idx}. Room {format_room_number(co['room_number'])} - {co['guest_name']}")
-            if co.get('main_remark'):
-                st.caption(co['main_remark'])
-    
-    # Stayovers
-    if stayovers:
-        st.divider()
-        st.subheader(f"🔄 Stayovers ({len(stayovers)})")
-        for idx, so in enumerate(stayovers, 1):
-            st.write(f"{idx}. Room {format_room_number(so['room_number'])} - {so['guest_name']}")
-    
-    # Arrivals
-    if arrivals:
-        st.divider()
-        st.subheader(f"✈️ Arrivals ({len(arrivals)})")
-        for idx, arr in enumerate(arrivals, 1):
-            st.write(f"{idx}. Room {format_room_number(arr['room_number'])} - {arr['guest_name']}")
-            if arr.get('main_remark'):
-                st.caption(arr['main_remark'])
+    df_tasks = clean_numeric_columns(df_tasks, ["Room"])
+    st.dataframe(df_tasks, use_container_width=True, hide_index=True)
+
+    st.caption(f"Total: {len(tasks)} tasks ({len([t for t in tasks if t['task_type']=='CHECKOUT'])} checkouts, {len([t for t in tasks if t['task_type']=='STAYOVER'])} stayovers, {len([t for t in tasks if t['task_type']=='ARRIVAL'])} arrivals)")
+
 
 
 def page_arrivals():
