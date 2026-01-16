@@ -286,39 +286,51 @@ class FrontOfficeDB:
             c = conn.cursor()
             
             # 1. Checkouts
-            c.execute("""
-                SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
-                FROM reservations r
-                LEFT JOIN stays s ON s.reservation_id = r.id
-                WHERE date(r.depart_date) = date(?)
-                AND r.room_number IS NOT NULL AND r.room_number != ''
-                AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
-                ORDER BY CAST(r.room_number AS INTEGER)
-            """, (target_date.isoformat(),))
+            # 1. Checkouts - ALL rooms departing today (including already checked out)
+        c.execute("""
+            SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks,
+                s.status
+            FROM reservations r
+            LEFT JOIN stays s ON s.reservation_id = r.id
+            WHERE date(r.depart_date) = date(?)
+            AND r.room_number IS NOT NULL AND r.room_number != ''
+            ORDER BY CAST(r.room_number AS INTEGER)
+        """, (target_date.isoformat(),))
+
+        checkouts = c.fetchall()
+
+        for co in checkouts:
+            co_dict = dict(co)
+            room = co_dict["room_number"]
+            guest = co_dict["guest_name"]
             
-            checkouts = c.fetchall()
+            # Set priority based on checkout status
+            if co_dict.get("status") == "CHECKED_OUT":
+                priority = "URGENT"  # Already checked out - needs immediate cleaning!
+            else:
+                priority = "HIGH"  # Expected checkout
             
-            for co in checkouts:
-                co_dict = dict(co)
-                room = co_dict["room_number"]
-                guest = co_dict["guest_name"]
-                
-                task = {
-                    "room": room,
-                    "task_type": "CHECKOUT",
-                    "priority": "HIGH",
-                    "description": f"Clean room {room} - {guest} checkout",
-                    "notes": []
-                }
-                
-                remarks = f"{co_dict.get('main_remark') or ''} {co_dict.get('total_remarks') or ''}".lower()
-                if '2t' in remarks:
-                    task["notes"].append("2 TWIN BEDS")
-                if 'vip' in remarks or 'birthday' in remarks:
-                    task["priority"] = "URGENT"
-                    task["notes"].append("VIP/SPECIAL")
-                
-                tasks.append(task)
+            task = {
+                "room": room,
+                "tasktype": "CHECKOUT",
+                "priority": priority,
+                "description": f"Clean room {room} - {guest} checkout",
+                "notes": []
+            }
+            
+            remarks = f"{co_dict.get('main_remark') or ''} {co_dict.get('total_remarks') or ''}".lower()
+            if '2t' in remarks:
+                task["notes"].append("2 TWIN BEDS")
+            if 'vip' in remarks or 'birthday' in remarks:
+                task["priority"] = "URGENT"
+                task["notes"].append("VIP/SPECIAL")
+            
+            # Add note if already checked out
+            if co_dict.get("status") == "CHECKED_OUT":
+                task["notes"].append("CHECKED OUT - CLEAN NOW")
+            
+            tasks.append(task)
+
             
             # 2. Stayovers
             c.execute("""
