@@ -1286,20 +1286,35 @@ def page_checkout_list():
         st.subheader("Quick checkout")
         for idx, row_data in enumerate(dep_rows, 1):
             row_dict = dict(row_data)
-            col1, col2 = st.columns([4, 1])
-            # for room decimal
-            room_num = int(float(row_dict['room_number'])) if row_dict['room_number'] else ''
-            col1.write(f"**{idx}.** Room {room_num} - {row_dict['guest_name']}")
+            
+            # Create a bordered card for each guest
+            with st.container():
+                col1, col2 = st.columns([5, 1])
+                
+                with col1:
+                    st.markdown(f"""
+                    <div style="
+                        border: 2px solid #e0e0e0; 
+                        border-radius: 8px; 
+                        padding: 12px; 
+                        background-color: #f9f9f9;
+                        margin-bottom: 8px;
+                    ">
+                        <strong style="font-size: 16px;">{idx}. Room {format_room_number(row_dict['roomnumber'])} - {row_dict['guestname']}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    if st.button("Check-out", key=f"co_{idx}_{row_dict['stayid']}", use_container_width=True):
+                        success, msg = db.checkout_stay(int(row_dict["stayid"]))
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
 
-            if col2.button("Check-out", key=f"co_{row_dict['stay_id']}", use_container_width=True):
-                success, msg = db.checkout_stay(int(row_dict["stay_id"]))
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-        
-    
+                
+            
     st.divider()
     st.subheader(f"Already checked out on {today.strftime('%d %B %Y')}")
     checkout_rows = db.get_checked_out_for_date(today)
