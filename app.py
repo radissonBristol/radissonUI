@@ -318,23 +318,26 @@ class FrontOfficeDB:
             # Use LIKE to match the date portion of timestamp
             target_str = target_date.isoformat()  # e.g., "2026-08-16"
             
-            # 1. Checkouts
+            # 1. Checkouts - ALL guests departing today (checked in OR checked out)
             c.execute("""
-            SELECT s.room_number, r.guest_name, r.main_remark, r.total_remarks, s.status
-            FROM stays s
-            JOIN reservations r ON r.id = s.reservation_id
-            WHERE s.status = 'CHECKED_IN'
-            AND s.checkout_planned LIKE ?
-            ORDER BY CAST(s.room_number AS INTEGER)
-        """, (f"{target_date.isoformat()}%",))
-            
+                SELECT s.room_number, r.guest_name, r.main_remark, r.total_remarks, s.status
+                FROM stays s
+                JOIN reservations r ON r.id = s.reservation_id
+                WHERE s.checkout_planned LIKE ?
+                AND s.room_number IS NOT NULL AND s.room_number != ''
+                ORDER BY 
+                    CASE WHEN s.status = 'CHECKED_OUT' THEN 0 ELSE 1 END,
+                    CAST(s.room_number AS INTEGER)
+            """, (f"{target_date.isoformat()}%",))
+
             checkouts = c.fetchall()
-            
+
             for co in checkouts:
                 co_dict = dict(co)
                 room = co_dict["room_number"]
                 guest = co_dict["guest_name"]
                 
+                # Mark already checked-out rooms as URGENT
                 if co_dict.get("status") == "CHECKED_OUT":
                     priority = "URGENT"
                 else:
@@ -355,10 +358,12 @@ class FrontOfficeDB:
                     task["priority"] = "URGENT"
                     task["notes"].append("VIP/SPECIAL")
                 
+                # Add note if already checked out
                 if co_dict.get("status") == "CHECKED_OUT":
-                    task["notes"].append("CHECKED OUT - CLEAN NOW")
+                    task["notes"].append("✓ CHECKED OUT - CLEAN NOW")
                 
                 tasks.append(task)
+
             
             # 2. Stayovers
             c.execute("""
