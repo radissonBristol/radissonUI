@@ -1484,7 +1484,7 @@ def page_search():
             """
             SELECT * FROM stays
             WHERE room_number LIKE ?
-            ORDER BY arrival_date DESC
+            ORDER BY checkin_planned DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1494,7 +1494,7 @@ def page_search():
             """
             SELECT * FROM stays
             WHERE guest_name LIKE ?
-            ORDER BY arrival_date DESC
+            ORDER BY checkin_planned DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1504,7 +1504,7 @@ def page_search():
             """
             SELECT * FROM stays
             WHERE reservation_no LIKE ?
-            ORDER BY arrival_date DESC
+            ORDER BY checkin_planned DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1514,7 +1514,7 @@ def page_search():
             """
             SELECT * FROM stays
             WHERE main_client LIKE ?
-            ORDER BY arrival_date DESC
+            ORDER BY checkin_planned DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1524,7 +1524,7 @@ def page_search():
             """
             SELECT * FROM stays
             WHERE channel LIKE ?
-            ORDER BY arrival_date DESC
+            ORDER BY checkin_planned DESC
             LIMIT 500
             """,
             (like_pattern,),
