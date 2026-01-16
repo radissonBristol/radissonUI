@@ -1323,8 +1323,9 @@ def page_search():
         search_type = st.selectbox(
             "Search by",
             [
-                "Guest Name",
+                
                 "Room Number",
+                "Guest Name",
                 "Reservation No",
                 "Main Client",
                 "Channel",
