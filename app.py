@@ -318,7 +318,6 @@ class FrontOfficeDB:
             # Use LIKE to match the date portion of timestamp
             target_str = target_date.isoformat()  # e.g., "2026-08-16"
             
-            # 1. Checkouts
             # 1. Checkouts - ALL guests departing today (checked in OR checked out)
             c.execute("""
                 SELECT s.room_number, r.guest_name, r.main_remark, r.total_remarks, s.status
@@ -961,13 +960,14 @@ class FrontOfficeDB:
         like_pattern = f"%{q}%"
         return self.fetch_all(
             """
-            SELECT * FROM stays
+            SELECT * FROM reservations
             WHERE guest_name LIKE ?
             OR room_number LIKE ?
             OR reservation_no LIKE ?
             OR main_client LIKE ?
             OR channel LIKE ?
             ORDER BY arrival_date DESC
+            LIMIT 500
             """,
             (like_pattern, like_pattern, like_pattern, like_pattern, like_pattern),
         )
@@ -1482,9 +1482,9 @@ def page_search():
         # Exact or partial room match
         rows = db.fetch_all(
             """
-            SELECT * FROM stays
+            SELECT * FROM reservations
             WHERE room_number LIKE ?
-            ORDER BY checkin_planned DESC
+            ORDER BY arrival_date DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1494,7 +1494,7 @@ def page_search():
             """
             SELECT * FROM reservations
             WHERE guest_name LIKE ?
-            ORDER BY checkin_planned DESC
+            ORDER BY arrival_date DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1504,7 +1504,7 @@ def page_search():
             """
             SELECT * FROM reservations
             WHERE reservation_no LIKE ?
-            ORDER BY checkin_planned DESC
+            ORDER BY arrival_date DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1514,7 +1514,7 @@ def page_search():
             """
             SELECT * FROM reservations
             WHERE main_client LIKE ?
-            ORDER BY checkin_planned DESC
+            ORDER BY arrival_date DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -1524,7 +1524,7 @@ def page_search():
             """
             SELECT * FROM reservations
             WHERE channel LIKE ?
-            ORDER BY checkin_planned DESC
+            ORDER BY arrival_date DESC
             LIMIT 500
             """,
             (like_pattern,),
@@ -2000,7 +2000,7 @@ def page_admin_upload():
 
 def main():
     st.set_page_config(
-        page_title="Test it guys!!",
+        page_title="Radisson Blu Bristol",
         page_icon="🏨",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -2022,7 +2022,7 @@ def main():
 
     with st.sidebar:
         st.title("YesWeCan! Bristol")
-        mode = "NEW TESTING MODE"
+        mode = "NEW LIVE MODE"
         st.markdown(f"**{mode}**")
         page = st.radio(
     "Navigate",
