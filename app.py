@@ -210,22 +210,22 @@ class FrontOfficeDB:
 
 
     def get_potential_no_shows(self, d: date):
-        """Get arrivals who didn't check in (potential no-shows)"""
+        """Get arrivals who didn't check in - potential no-shows"""
         return self.fetch_all(
-    """
-    SELECT r.id, r.guest_name, r.reservation_no, r.main_client, r.room_number
-    FROM reservations r
-    WHERE r.arrival_date = ?
-    AND NOT EXISTS (
-        SELECT 1 FROM stays s
-        WHERE s.reservation_id = r.id
-        AND s.status = 'CHECKED_IN'
-    )
-    ORDER BY r.guest_name
+            """
+            SELECT r.id, r.guest_name, r.reservation_no, r.main_client, r.room_number
+            FROM reservations r
+            WHERE date(r.arrival_date) = date(?)
+            AND NOT EXISTS (
+                SELECT 1 FROM stays s
+                WHERE s.reservation_id = r.id
+                    AND s.status = 'CHECKED_IN'
+            )
+            ORDER BY r.guest_name
+            """,
+            (d.isoformat(),),
+        )
 
-    """,
-    (d.isoformat(),),
-)
 
     def get_conn(self):
             conn = sqlite3.connect(self.dbpath, check_same_thread=False)
@@ -279,7 +279,9 @@ class FrontOfficeDB:
         )
 
     def generate_hsk_tasks_for_date(self, target_date: date):
-    # 1. Checkouts
+        tasks = []
+        
+        # 1. Checkouts
         checkouts = self.fetch_all(
             """
             SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
@@ -296,48 +298,57 @@ class FrontOfficeDB:
         for co in checkouts:
             remarks = f"{co.get('main_remark') or co.get('total_remarks') or ''}".lower()
             notes = []
+            priority = "HIGH"
+            
             if '2t' in remarks:
                 notes.append("2 TWIN BEDS")
             if 'vip' in remarks or 'birthday' in remarks:
                 notes.append("VIP/SPECIAL")
+                priority = "URGENT"
             
-            self.execute(
-                """
-                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    target_date.isoformat(),
-                    f"CHECKOUT - Room {co['room_number']} - {co['guest_name']}",
-                    " | ".join(notes) if notes else "",
-                ),
-            )
+            tasks.append({
+                "room": co["room_number"],
+                "tasktype": "CHECKOUT",
+                "priority": priority,
+                "action": "Deep Clean",
+                "description": f"{co['guest_name']} departure",
+                "notes": " | ".join(notes) if notes else ""
+            })
 
         # 2. Stayovers
         stayovers = self.fetch_all(
             """
-            SELECT DISTINCT r.room_number, r.guest_name
+            SELECT DISTINCT r.room_number, r.guest_name, r.main_remark, r.total_remarks
             FROM reservations r
+            LEFT JOIN stays s ON s.reservation_id = r.id
             WHERE date(r.arrival_date) < date(?)
             AND date(r.depart_date) > date(?)
             AND r.room_number IS NOT NULL
+            AND (s.status = 'CHECKED_IN' OR s.status IS NULL)
             ORDER BY CAST(r.room_number AS INTEGER)
             """,
             (target_date.isoformat(), target_date.isoformat()),
         )
 
         for so in stayovers:
-            self.execute(
-                """
-                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    target_date.isoformat(),
-                    f"STAYOVER - Room {so['room_number']} - {so['guest_name']}",
-                    "",
-                ),
-            )
+            remarks = f"{so.get('main_remark') or so.get('total_remarks') or ''}".lower()
+            notes = []
+            priority = "MEDIUM"
+            
+            if 'vip' in remarks:
+                notes.append("VIP GUEST")
+                priority = "HIGH"
+            if 'dnd' in remarks or 'do not disturb' in remarks:
+                notes.append("DND - Check later")
+            
+            tasks.append({
+                "room": so["room_number"],
+                "tasktype": "STAYOVER",
+                "priority": priority,
+                "action": "Refresh",
+                "description": f"{so['guest_name']} staying",
+                "notes": " | ".join(notes) if notes else ""
+            })
 
         # 3. Arrivals
         arrivals = self.fetch_all(
@@ -354,22 +365,31 @@ class FrontOfficeDB:
         for arr in arrivals:
             remarks = f"{arr.get('main_remark') or arr.get('total_remarks') or ''}".lower()
             notes = []
+            priority = "HIGH"
+            
             if '2t' in remarks:
                 notes.append("2 TWIN BEDS")
             if 'accessible' in remarks or 'disabled' in remarks:
                 notes.append("ACCESSIBLE ROOM")
+                priority = "URGENT"
+            if 'early' in remarks or 'eci' in remarks:
+                notes.append("EARLY CHECK-IN")
+                priority = "URGENT"
+            if 'vip' in remarks or 'honeymoon' in remarks or 'anniversary' in remarks:
+                notes.append("VIP/SPECIAL")
+                priority = "URGENT"
             
-            self.execute(
-                """
-                INSERT OR IGNORE INTO tasks (taskdate, title, comment)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    target_date.isoformat(),
-                    f"ARRIVAL - Room {arr['room_number']} - {arr['guest_name']}",
-                    " | ".join(notes) if notes else "",
-                ),
-            )
+            tasks.append({
+                "room": arr["room_number"],
+                "tasktype": "ARRIVAL",
+                "priority": priority,
+                "action": "Prepare",
+                "description": f"{arr['guest_name']} arriving",
+                "notes": " | ".join(notes) if notes else ""
+            })
+
+        return tasks
+
 
     def cancel_checkin(self, stay_id: int):
         stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
@@ -971,7 +991,7 @@ db = None  # Will be initialized in main()
  # Use cached connection
 
 
-def page_breakfast_list():
+def page_breakfast():
     st.header("Breakfast List")
     today = st.date_input("Date", value=date.today(), key="breakfast_date")
     
