@@ -305,7 +305,7 @@ class FrontOfficeDB:
                 
                 task = {
                     "room": room,
-                    "tasktype": "CHECKOUT",
+                    "task_type": "CHECKOUT",
                     "priority": "HIGH",
                     "description": f"Clean room {room} - {guest} checkout",
                     "notes": []
@@ -338,7 +338,7 @@ class FrontOfficeDB:
                 so_dict = dict(so)  # Convert to dict
                 tasks.append({
                     "room": so_dict["room_number"],
-                    "tasktype": "STAYOVER",
+                    "task_type": "STAYOVER",
                     "priority": "MEDIUM",
                     "description": f"Refresh room {so_dict['room_number']} - {so_dict['guest_name']} stayover",
                     "notes": []
@@ -362,7 +362,7 @@ class FrontOfficeDB:
                 
                 task = {
                     "room": room,
-                    "tasktype": "ARRIVAL",
+                    "task_type": "ARRIVAL",
                     "priority": "HIGH",
                     "description": f"Prepare room {room} for {guest} arrival",
                     "notes": []
