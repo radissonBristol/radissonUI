@@ -49,7 +49,7 @@ def clean_numeric_columns(df: pd.DataFrame, cols: list):
 
 
 # PostgreSQL configuration
-TEST_MODE = True  # set False for live system
+TEST_MODE = False  # set False for live system
 
 if TEST_MODE:
     DBPATH = "hotelfoTEST.db"
@@ -701,7 +701,7 @@ class FrontOfficeDB:
         JOIN reservations r ON r.id = s.reservation_id
         WHERE s.status = 'CHECKED_IN'
         AND date(s.checkin_planned) <= date(?)
-        AND date(s.checkout_planned) > date(?)
+        AND date(s.checkout_planned) = date(?)
         ORDER BY s.room_number
         """,
         (target_date.isoformat(), target_date.isoformat()),
@@ -1890,8 +1890,8 @@ def main():
 
 
     with st.sidebar:
-        st.title("Front Office Hub")
-        mode = "NEW TEST MODE"
+        st.title("YesWeCan! Bristol")
+        mode = "NEW LIVE MODE"
         st.markdown(f"**{mode}**")
         page = st.radio(
     "Navigate",
@@ -1915,7 +1915,7 @@ def main():
 
 
         st.markdown("---")
-        st.caption("Welcome to Radisson Blu v1.0")
+        st.caption("Welcome to YesWeCan! v1.0")
 
     if page == "Arrivals":
         page_arrivals()
