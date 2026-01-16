@@ -1430,8 +1430,6 @@ def page_no_shows():
             "Guest": r["guest_name"],
             "Client": r["main_client"] if r.get("main_client") else "",
             "Charged": f"£{float(r['amount_charged']):.2f}" if r.get('amount_charged') is not None else "£0.00",
-            "Pending": f"£{float(r['amount_pending']):.2f}" if r.get('amount_pending') is not None else "£0.00",
-            "Paid": "✓" if r["charged"] else "✗",
             "Comment": r.get("comment", "")
         } for r in rows])
         
