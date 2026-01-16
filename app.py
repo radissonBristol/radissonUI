@@ -900,7 +900,7 @@ class FrontOfficeDB:
                 """
                 UPDATE no_shows SET
                     main_client = ?,
-                    amount_charged = ?,
+                    charged = ?,
                     comment = ?
                 WHERE id = ?
                 """,
@@ -922,7 +922,7 @@ class FrontOfficeDB:
                 "date": arrival_date,
                 "guest": guest_name,
                 "client": main_client,
-                "amount_charged": amount_charged or 0,
+                "charged": amount_charged or 0,
                 "comment": comment
             })
 
