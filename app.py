@@ -907,6 +907,7 @@ class FrontOfficeDB:
                 (
                     main_client,
                     amount_charged or 0,
+                    amount_pending or 0,
                     comment,
                     existing["id"],
                 ),
@@ -915,14 +916,15 @@ class FrontOfficeDB:
         else:
             # Insert new
             self.execute("""
-                 INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, 
+                 INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, amount_pending, 
                                       comment)
-                VALUES (:date, :guest, :client, :amt_charged, :comment)
+                VALUES (:date, :guest, :client, :charged, :comment)
             """, {
                 "date": arrival_date,
                 "guest": guest_name,
                 "client": main_client,
-                "amt_charged": amount_charged or 0,
+                "charged": amount_charged or 0,
+                "amount_pending": amount_pending or 0,
                 "comment": comment
             })
 
