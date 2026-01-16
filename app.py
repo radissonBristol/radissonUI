@@ -4,11 +4,26 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+import sqlite3
+from contextlib import closing
+import time
+
 
 # Initialize database AFTER set_page_config in main()
 db = None
+
+def format_date(date_str):
+    """Format date string, removing time portion"""
+    if not date_str:
+        return ''
+    try:
+        # Parse the datetime string
+        dt = datetime.fromisoformat(str(date_str))
+        # Return formatted date (e.g., "15 January 2026")
+        return dt.strftime("%d %B %Y")
+    except (ValueError, TypeError):
+        # Fallback: just remove time if simple string
+        return str(date_str).split()[0] if ' ' in str(date_str) else str(date_str)
 
 def clean_numeric_columns(df: pd.DataFrame, cols: list):
     """Convert numeric columns to whole numbers for display"""
@@ -21,8 +36,14 @@ def clean_numeric_columns(df: pd.DataFrame, cols: list):
 
 
 # PostgreSQL configuration
-DATABASE_URL = st.secrets["DATABASE_URL"]
-ARRIVALS_ROOT = "data/arrivals"
+TEST_MODE = True  # set False for live system
+
+if TEST_MODE:
+    DBPATH = "hotelfoTEST.db"
+    ARRIVALS_ROOT = "data/arrivals-test"
+else:
+    DBPATH = "hotelfo.db"
+    ARRIVALS_ROOT = "data/arrivals"
 
        
 
@@ -55,202 +76,209 @@ def clean_numeric_columns(df: pd.DataFrame, cols: list):
     return df
 
 class FrontOfficeDB:
-    def __init__(self):
-        from sqlalchemy.pool import QueuePool
-        
-        self.engine = create_engine(
-            DATABASE_URL,
-            poolclass=QueuePool,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True
-        )
-        self._init_db()
-        
-        # RE-ENABLE THIS:
+    def init_db(self):
+            with closing(self.get_conn()) as conn, conn:
+                c = conn.cursor()
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS reservations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        amount_pending REAL,
+                        arrival_date TEXT,
+                        depart_date TEXT,
+                        room_number TEXT,
+                        room_type_code TEXT,
+                        adults INTEGER,
+                        children INTEGER,
+                        total_guests INTEGER,
+                        reservation_no TEXT,
+                        voucher TEXT,
+                        related_reservation TEXT,
+                        crs_code TEXT,
+                        crs_name TEXT,
+                        guest_id_raw TEXT,
+                        guest_name TEXT,
+                        vip_flag TEXT,
+                        client_id TEXT,
+                        main_client TEXT,
+                        nights INTEGER,
+                        meal_plan TEXT,
+                        rate_code TEXT,
+                        channel TEXT,
+                        cancellation_policy TEXT,
+                        main_remark TEXT,
+                        contact_name TEXT,
+                        contact_phone TEXT,
+                        contact_email TEXT,
+                        total_remarks TEXT,
+                        source_of_business TEXT,
+                        stay_option_desc TEXT,
+                        remarks_by_chain TEXT,
+                        reservation_group_id TEXT,
+                        reservation_group_name TEXT,
+                        company_name TEXT,
+                        company_id_raw TEXT,
+                        country TEXT,
+                        reservation_status TEXT DEFAULT 'CONFIRMED',
+                        created_at TEXT DEFAULT (datetime('now')),
+                        updated_at TEXT DEFAULT (datetime('now'))
+                    )
+                """)
+
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS stays (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        reservation_id INTEGER,
+                        room_number TEXT,
+                        status TEXT DEFAULT 'EXPECTED',
+                        checkin_planned TEXT,
+                        checkout_planned TEXT,
+                        checkin_actual TEXT,
+                        checkout_actual TEXT,
+                        breakfast_code TEXT,
+                        comment TEXT,
+                        parking_space TEXT,
+                        parking_plate TEXT,
+                        parking_notes TEXT,
+                        FOREIGN KEY (reservation_id) REFERENCES reservations(id)
+                    )
+                """)
+
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS rooms (
+                        room_number TEXT PRIMARY KEY,
+                        room_type TEXT,
+                        floor INTEGER,
+                        status TEXT DEFAULT 'VACANT',
+                        is_twin INTEGER DEFAULT 0
+                    )
+                """)
+
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_date TEXT,
+                        title TEXT,
+                        created_by TEXT,
+                        assigned_to TEXT,
+                        comment TEXT,
+                        created_at TEXT DEFAULT (datetime('now'))
+                    )
+                """)
+
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS no_shows (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        arrival_date TEXT,
+                        guest_name TEXT,
+                        main_client TEXT,
+                        charged INTEGER,
+                        amount_charged REAL,
+                        amount_pending REAL,
+                        comment TEXT,
+                        created_at TEXT DEFAULT (datetime('now'))
+                    )
+                """)
+
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS spare_rooms (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_date TEXT,
+                        room_number TEXT
+                    )
+                """)
+
+    def __init__(self, dbpath: str):
+        self.dbpath = dbpath
+        self.init_db()
         if self.reservations_empty():
             self.import_all_arrivals_from_fs()
-        
-        self.seed_rooms_from_blocks()
-        self.sync_room_status_from_stays()
+            self.seed_rooms_from_blocks()
+            self.sync_room_status_from_stays()
+
 
     def get_potential_no_shows(self, d: date):
         """Get arrivals who didn't check in (potential no-shows)"""
-        return self._fetch_all("""
-            SELECT r.id, r.guest_name, r.reservation_no, r.main_client, r.room_number
-            FROM reservations r
-            WHERE r.arrival_date = :date
-            AND NOT EXISTS (
-                SELECT 1 FROM stays s 
-                WHERE s.reservation_id = r.id 
-                AND s.status = 'CHECKED_IN'
-            )
-            ORDER BY r.guest_name
-        """, {"date": d})
+        return self.fetch_all(
+    """
+    SELECT r.id, r.guest_name, r.reservation_no, r.main_client, r.room_number
+    FROM reservations r
+    WHERE r.arrival_date = ?
+    AND NOT EXISTS (
+        SELECT 1 FROM stays s
+        WHERE s.reservation_id = r.id
+        AND s.status = 'CHECKED_IN'
+    )
+    ORDER BY r.guest_name
 
+    """,
+    (d.isoformat(),),
+)
 
+    def get_conn(self):
+            conn = sqlite3.connect(self.dbpath, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
 
-    def _get_conn(self):
-        return self.engine.connect()
-    
-    def _execute(self, query, params=None):
-        with self.engine.begin() as conn:
-            conn = conn.execution_options(timeout=5)  # 5 second timeout
-            if params:
-                return conn.execute(text(query), params)
+    def execute(self, query, params=None):
+        with closing(self.get_conn()) as conn, conn:
+            c = conn.cursor()
+            if params is None:
+                c.execute(query)
             else:
-                return conn.execute(text(query))
+                c.execute(query, params)
+            return c
 
-    def _fetch_all(self, query, params=None):
-        with self.engine.connect() as conn:
-            conn = conn.execution_options(timeout=5)
-            if params:
-                result = conn.execute(text(query), params)
+    def fetch_all(self, query, params=None):
+        with closing(self.get_conn()) as conn:
+            c = conn.cursor()
+            if params is None:
+                c.execute(query)
             else:
-                result = conn.execute(text(query))
-            return [dict(row._mapping) for row in result]
+                c.execute(query, params)
+            rows = c.fetchall()
+            return [dict(row) for row in rows]
 
-    
-    def _fetch_one(self, query, params=None):
-        """Helper to fetch one result as dict"""
-        with self.engine.connect() as conn:
-            if params:
-                result = conn.execute(text(query), params)
+    def fetch_one(self, query, params=None):
+        with closing(self.get_conn()) as conn:
+            c = conn.cursor()
+            if params is None:
+                c.execute(query)
             else:
-                result = conn.execute(text(query))
-            row = result.fetchone()
-            return dict(row._mapping) if row else None
+                c.execute(query, params)
+            row = c.fetchone()
+            return dict(row) if row else None
 
-
-    def _init_db(self):
-           with self.engine.begin() as conn:
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS reservations (
-                   id SERIAL PRIMARY KEY,
-                   amount_pending DECIMAL(10,2),
-                   arrival_date DATE,
-                   depart_date DATE,
-                   room_number VARCHAR(10),
-                   room_type_code VARCHAR(20),
-                   adults INTEGER,
-                   children INTEGER,
-                   total_guests INTEGER,
-                   reservation_no VARCHAR(50),
-                   voucher VARCHAR(100),
-                   related_reservation VARCHAR(50),
-                   crs_code VARCHAR(50),
-                   crs_name VARCHAR(200),
-                   guest_id_raw VARCHAR(50),
-                   guest_name VARCHAR(200),
-                   vip_flag VARCHAR(50),
-                   client_id VARCHAR(50),
-                   main_client VARCHAR(200),
-                   nights INTEGER,
-                   meal_plan VARCHAR(50),
-                   rate_code VARCHAR(50),
-                   channel VARCHAR(100),
-                   cancellation_policy VARCHAR(200),
-                   main_remark TEXT,
-                   contact_name VARCHAR(200),
-                   contact_phone VARCHAR(50),
-                   contact_email VARCHAR(200),
-                   total_remarks TEXT,
-                   source_of_business VARCHAR(200),
-                   stay_option_desc TEXT,
-                   remarks_by_chain TEXT,
-                   reservation_group_id VARCHAR(50),
-                   reservation_group_name VARCHAR(200),
-                   company_name VARCHAR(200),
-                   company_id_raw VARCHAR(50),
-                   country VARCHAR(50),
-                   reservation_status VARCHAR(50) DEFAULT 'CONFIRMED',
-                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-               )
-               """))
-               
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS stays (
-                   id SERIAL PRIMARY KEY,
-                   reservation_id INTEGER REFERENCES reservations(id),
-                   room_number VARCHAR(10),
-                   status VARCHAR(20) DEFAULT 'EXPECTED',
-                   checkin_planned DATE,
-                   checkout_planned DATE,
-                   checkin_actual TIMESTAMP,
-                   checkout_actual TIMESTAMP,
-                   breakfast_code VARCHAR(20),
-                   comment TEXT,
-                   parking_space VARCHAR(20),
-                   parking_plate VARCHAR(50),
-                   parking_notes TEXT
-               )
-               """))
-               
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS rooms (
-                   room_number VARCHAR(10) PRIMARY KEY,
-                   room_type VARCHAR(50),
-                   floor INTEGER,
-                   status VARCHAR(20) DEFAULT 'VACANT',
-                   is_twin INTEGER DEFAULT 0
-               )
-               """))
-               
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS tasks (
-                   id SERIAL PRIMARY KEY,
-                   task_date DATE,
-                   title TEXT,
-                   created_by VARCHAR(100),
-                   assigned_to VARCHAR(100),
-                   comment TEXT,
-                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-               )
-               """))
-               
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS no_shows (
-                   id SERIAL PRIMARY KEY,
-                   arrival_date DATE,
-                   guest_name VARCHAR(200),
-                   main_client VARCHAR(200),
-                   charged INTEGER,
-                   comment TEXT,
-                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-               )
-               """))
-               
-               conn.execute(text("""
-               CREATE TABLE IF NOT EXISTS spare_rooms (
-                   id SERIAL PRIMARY KEY,
-                   target_date DATE,
-                   room_number VARCHAR(10)
-               )
-               """))
 
     def get_breakfast_list_for_date(self, target_date: date):
-        return self._fetch_all("""
+        return self.fetch_all(
+            """
             SELECT r.room_number, r.guest_name, r.adults, r.children, r.total_guests, r.meal_plan
-            FROM reservations r LEFT JOIN stays s ON s.reservation_id = r.id
-            WHERE r.arrival_date <= :date AND r.depart_date > :date
-              AND r.room_number IS NOT NULL AND r.room_number != ''
-              AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
-              AND (r.meal_plan ILIKE '%BB%' OR r.meal_plan ILIKE '%Breakfast%')
-            ORDER BY CAST(r.room_number::NUMERIC AS INTEGER)
-        """, {"date": target_date})
+            FROM reservations r
+            LEFT JOIN stays s ON s.reservation_id = r.id
+            WHERE date(r.arrival_date) <= date(?)
+            AND date(r.depart_date) > date(?)
+            AND r.room_number IS NOT NULL AND r.room_number != ''
+            AND (s.status IS NULL OR s.status != 'CHECKEDOUT')
+            AND (r.meal_plan LIKE '%BB%' OR r.meal_plan LIKE '%Breakfast%')
+            ORDER BY CAST(r.room_number AS INTEGER)
+            """,
+            (target_date.isoformat(), target_date.isoformat()),
+        )
+
     def generate_hsk_tasks_for_date(self, target_date: date):
         tasks = []
         
         # 1. Checkouts
-        checkouts = self._fetch_all("""
-            SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
-            FROM reservations r
-            WHERE r.depart_date = :date
-            AND r.room_number IS NOT NULL
-            ORDER BY r.room_number
-        """, {"date": target_date})
-        
+        checkouts = self.fetch_all(
+        """
+        SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
+        FROM reservations r
+        WHERE r.depart_date = ?
+        AND r.room_number IS NOT NULL
+        ORDER BY CAST(r.room_number AS INTEGER)
+        """,
+        (target_date.isoformat(),),
+    ) 
         for co in checkouts:
             task = {
                 "room": co["room_number"],
@@ -268,14 +296,17 @@ class FrontOfficeDB:
             tasks.append(task)
         
         # 2. Stayovers - FIX: Remove CAST from ORDER BY
-        stayovers = self._fetch_all("""
-            SELECT DISTINCT r.room_number, r.guest_name
-            FROM reservations r
-            WHERE r.arrival_date < :date
-            AND r.depart_date > :date
-            AND r.room_number IS NOT NULL
-            ORDER BY r.room_number
-        """, {"date": target_date})
+        stayovers = self.fetch_all(
+        """
+        SELECT DISTINCT r.room_number, r.guest_name
+        FROM reservations r
+        WHERE r.arrival_date < ?
+        AND r.depart_date > ?
+        AND r.room_number IS NOT NULL
+        ORDER BY r.room_number
+        """,
+        (target_date.isoformat(), target_date.isoformat()),
+    )
         
         for so in stayovers:
             tasks.append({
@@ -287,13 +318,18 @@ class FrontOfficeDB:
             })
         
         # 3. Arrivals
-        arrivals = self._fetch_all("""
-            SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
-            FROM reservations r
-            WHERE r.arrival_date = :date
-            AND r.room_number IS NOT NULL
-            ORDER BY r.room_number
-        """, {"date": target_date})
+        arrivals = self.fetch_all(
+        """
+        SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
+        FROM reservations r
+        WHERE r.arrival_date = ?
+        AND r.room_number IS NOT NULL
+        ORDER BY r.room_number
+        """,
+        (target_date.isoformat(),),
+)
+
+
         
         for arr in arrivals:
             task = {
@@ -312,30 +348,28 @@ class FrontOfficeDB:
         
         return tasks
 
-    def cancel_checkin(self, reservation_id: int):
-        stay = self._fetch_one("""
-            SELECT s.*, r.room_number FROM stays s
-            JOIN reservations r ON r.id = s.reservation_id
-            WHERE s.reservation_id = :id AND s.status = 'CHECKED_IN'
-        """, {"id": reservation_id})
-        
+    def cancel_checkin(self, stay_id: int):
+        stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
         if not stay:
-            return False, "No active check-in found"
+            return False, "Stay not found"
         
-        self._execute("DELETE FROM stays WHERE id = :id", {"id": stay["id"]})
-        self._execute("UPDATE rooms SET status = 'VACANT' WHERE room_number = :room", {"room": stay["room_number"]})
-        return True, f"Check-in cancelled for room {stay['room_number']}"
+        self.execute("DELETE FROM stays WHERE id = ?", (stay_id,))
+        self.execute(
+            "UPDATE rooms SET status = 'VACANT' WHERE room_number = ?",
+            (stay["room_number"],),
+        )
+        return True, "Check-in cancelled successfully"
 
 
     def cancel_checkout(self, stay_id: int):
-        stay = self._fetch_one("SELECT * FROM stays WHERE id = :id", {"id": stay_id})
+        stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
         if not stay:
             return False, "Stay not found"
         if stay["status"] != "CHECKED_OUT":
             return False, "Not checked out"
         
-        self._execute("UPDATE stays SET status = 'CHECKED_IN', checkout_actual = NULL WHERE id = :id", {"id": stay_id})
-        self._execute("UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = :room", {"room": stay["room_number"]})
+        self.execute("UPDATE stays SET status = 'CHECKED_IN', checkout_actual = NULL WHERE id = ?", (stay_id,))
+        self.execute("UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = ?", (stay["room_number"],))
         return True, f"Check-out cancelled - room {stay['room_number']} back to in-house"
 
 
@@ -372,15 +406,21 @@ class FrontOfficeDB:
         except:
             return False, "Invalid room number format"
         
-        conflict = self._fetch_one("""
+        params = [rn, depart_date.isoformat(), arrival_date.isoformat()]
+        sql = """
             SELECT r.id, r.guest_name, r.arrival_date, r.depart_date, r.reservation_no
             FROM reservations r
-            WHERE r.room_number = :room
-            AND r.arrival_date < :depart
-            AND r.depart_date > :arrival
-            AND (:exclude_id IS NULL OR r.id != :exclude_id)
-        """, {"room": rn, "depart": depart_date, "arrival": arrival_date, "exclude_id": exclude_reservation_id})
-        
+            WHERE r.room_number = ?
+            AND r.arrival_date < ?
+            AND r.depart_date > ?
+        """
+
+        if exclude_reservation_id is not None:
+            sql += " AND r.id != ?"
+            params.append(exclude_reservation_id)
+
+        conflict = self.fetch_one(sql, tuple(params))
+       
         if conflict:
             return False, f"Room {rn} occupied by {conflict['guest_name']} (Res #{conflict['reservation_no']})"
         return True, ""
@@ -388,11 +428,11 @@ class FrontOfficeDB:
 
    
     def reservations_empty(self):
-        result = self._fetch_one("SELECT COUNT(*) as cnt FROM reservations")
+        result = self.fetch_one("SELECT COUNT(*) as cnt FROM reservations")
         return result["cnt"] == 0 if result else True
 
 
-    def _build_reservations_from_df(self, df: pd.DataFrame):
+    def build_reservations_from_df(self, df: pd.DataFrame):
            df.columns = [str(c).strip() for c in df.columns]
            
            # Simple mapping - keep everything as strings initially
@@ -431,12 +471,15 @@ class FrontOfficeDB:
     def import_arrivals_file(self, path: str):
         try:
             df = pd.read_excel(path)
-            df_db = self._build_reservations_from_df(df)
-            df_db.to_sql("reservations", self.engine, if_exists="append", index=False, method='multi')
+            df_db = self.build_reservations_from_df(df)
+            from contextlib import closing
+            with closing(self.get_conn()) as conn:
+                df_db.to_sql("reservations", conn, if_exists="append", index=False)
             return len(df_db)
         except Exception as e:
             st.error(f"Import error: {e}")
             return 0
+
 
 
     def import_all_arrivals_from_fs(self) -> int:
@@ -448,52 +491,72 @@ class FrontOfficeDB:
         return total
 
     def get_arrivals_for_date(self, d: date):
-        return self._fetch_all("""
-            SELECT r.* FROM reservations r
-            WHERE r.arrival_date = :date
+        return self.fetch_all(
+            """
+            SELECT r.*
+            FROM reservations r
+            WHERE date(r.arrival_date) = date(?)
             AND NOT EXISTS (
-                SELECT 1 FROM stays s 
-                WHERE s.reservation_id = r.id 
-                AND s.status IN ('CHECKED_IN', 'CHECKED_OUT')
+                SELECT 1 FROM stays s
+                WHERE s.reservation_id = r.id
+                    AND s.status IN ('CHECKED_IN','CHECKED_OUT')
             )
             ORDER BY COALESCE(r.room_number, ''), r.guest_name
-        """, {"date": d})
+            """,
+            (d.isoformat(),),
+        )
 
 
 
-
-    def update_reservation_room(self, res_id: int, room_number: str):
+    def update_reservation_room(self, resid: int, room_number: str):
         if not room_number or not room_number.strip():
             return False, "Room number cannot be empty"
-        
-        is_valid, result = self.is_valid_room_number(room_number)
-        if not is_valid:
+
+        isvalid, result = self.is_valid_room_number(room_number)
+        if not isvalid:
             return False, result
-        
-        res = self._fetch_one("SELECT arrival_date, depart_date FROM reservations WHERE id = :id", {"id": res_id})
+
+        with closing(self.get_conn()) as conn:
+            c = conn.cursor()
+            c.execute("SELECT arrival_date, depart_date FROM reservations WHERE id = ?", (resid,))
+            res = c.fetchone()
+
         if not res:
             return False, "Reservation not found"
-        
-        available, msg = self.check_room_available_for_assignment(result, res["arrival_date"], res["depart_date"], res_id)
+
+        arr = datetime.fromisoformat(res["arrival_date"]).date()
+        dep = datetime.fromisoformat(res["depart_date"]).date()
+
+
+        available, msg = self.check_room_available_for_assignment(result, arr, dep, resid)
         if not available:
             return False, msg
-        
-        self._execute("UPDATE reservations SET room_number = :room, updated_at = CURRENT_TIMESTAMP WHERE id = :id", 
-                    {"room": result, "id": res_id})
+
+        with closing(self.get_conn()) as conn, conn:
+            c = conn.cursor()
+            c.execute(
+                "UPDATE reservations SET room_number = ?, updated_at = datetime('now') WHERE id = ?",
+                (result, resid),
+            )
+
         return True, f"Room {result} assigned successfully"
+
 
 
     
     def get_checked_out_for_date(self, d: date):
-        return self._fetch_all("""
-            SELECT DISTINCT ON (s.id) 
-                s.*, r.guest_name, r.reservation_no
+        return self.fetch_all(
+            """
+            SELECT s.*, r.guest_name, r.reservation_no
             FROM stays s
             JOIN reservations r ON r.id = s.reservation_id
             WHERE s.status = 'CHECKED_OUT'
-            AND s.checkout_actual::date = :date
-            ORDER BY s.id, s.checkout_actual DESC
-        """, {"date": d})
+            AND date(s.checkout_actual) = date(?)
+            ORDER BY CAST(s.room_number AS INTEGER)
+            """,
+            (d.isoformat(),),
+        )
+
 
 
 
@@ -502,7 +565,7 @@ class FrontOfficeDB:
     def ensure_room_exists(self, room_number: str):
         if not room_number:
             return
-        self._execute("""
+        self.execute("""
             INSERT INTO rooms (room_number, status) VALUES (:room, 'VACANT')
             ON CONFLICT (room_number) DO NOTHING
         """, {"room": room_number.strip()})
@@ -513,7 +576,8 @@ class FrontOfficeDB:
 
 
     def checkin_reservation(self, res_id: int):
-        res = self._fetch_one("SELECT * FROM reservations WHERE id = :id", {"id": res_id})
+        res = self.fetch_one("SELECT * FROM reservations WHERE id = ?", (res_id,))
+
         if not res:
             return False, "Reservation not found"
         if not res["room_number"]:
@@ -528,35 +592,57 @@ class FrontOfficeDB:
         
         self.ensure_room_exists(result)
         
-        self._execute("""
+        self.execute("""
             INSERT INTO stays (reservation_id, room_number, status, checkin_planned, checkout_planned, checkin_actual)
             VALUES (:res_id, :room, 'CHECKED_IN', :arr, :dep, CURRENT_TIMESTAMP)
         """, {"res_id": res_id, "room": result, "arr": res["arrival_date"], "dep": res["depart_date"]})
         
-        self._execute("UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = :room", {"room": result})
+        self.execute(
+    "UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = ?",
+    (result,),
+)
+
         return True, "Checked in successfully"
     
     def checkout_stay(self, stay_id: int):
-        stay = self._fetch_one("SELECT * FROM stays WHERE id = :id", {"id": stay_id})
+        # Try to find existing stay by stay_id
+        stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
         
         if stay:
-            self._execute("UPDATE stays SET status = 'CHECKED_OUT', checkout_actual = CURRENT_TIMESTAMP WHERE id = :id", 
-                        {"id": stay_id})
-            self._execute("UPDATE rooms SET status = 'VACANT' WHERE room_number = :room", {"room": stay["room_number"]})
+            # Existing stay: mark as checked out
+            self.execute(
+                "UPDATE stays SET status = 'CHECKED_OUT', checkout_actual = datetime('now') WHERE id = ?",
+                (stay_id,),
+            )
+            self.execute(
+                "UPDATE rooms SET status = 'VACANT' WHERE room_number = ?",
+                (stay["room_number"],),
+            )
         else:
-            res = self._fetch_one("SELECT * FROM reservations WHERE id = :id", {"id": stay_id})
+            # No stay row: treat stay_id as reservation_id
+            res = self.fetch_one("SELECT * FROM reservations WHERE id = ?", (stay_id,))
             if not res or not res["room_number"]:
-                return False, "Not found"
+                return False, "Reservation not found or no room assigned"
             
-            self._execute("""
-                INSERT INTO stays (reservation_id, room_number, status, checkin_planned, checkout_planned, 
-                                checkin_actual, checkout_actual)
-                VALUES (:res_id, :room, 'CHECKED_OUT', :arr, :dep, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """, {"res_id": stay_id, "room": res["room_number"], "arr": res["arrival_date"], "dep": res["depart_date"]})
-            
-            self._execute("UPDATE rooms SET status = 'VACANT' WHERE room_number = :room", {"room": res["room_number"]})
-        
-        return True, "Checked out"
+            self.execute(
+                """
+                INSERT INTO stays (
+                    reservation_id, room_number, status,
+                    checkin_planned, checkout_planned,
+                    checkin_actual, checkout_actual
+                )
+                VALUES (?, ?, 'CHECKED_OUT', ?, ?, datetime('now'), datetime('now'))
+                """,
+                (stay_id, res["room_number"], res["arrival_date"], res["depart_date"]),
+            )
+            self.execute(
+                "UPDATE rooms SET status = 'VACANT' WHERE room_number = ?",
+                (res["room_number"],),
+            )
+
+        return True, "Checked out successfully"
+
+
 
 
 
@@ -565,42 +651,52 @@ class FrontOfficeDB:
         if not target_date:
             target_date = date.today()
         
-        return self._fetch_all("""
-            SELECT 
-                s.id as stay_id,
-                s.reservation_id as id,
-                r.reservation_no,
-                r.guest_name,
-                s.room_number,
-                s.checkin_planned,
-                s.checkout_planned,
-                r.meal_plan as breakfast_code,
-                r.main_remark as comment,
-                COALESCE(s.parking_space, '') as parking_space,
-                COALESCE(s.parking_plate, '') as parking_plate,
-                s.status
-            FROM stays s
-            JOIN reservations r ON r.id = s.reservation_id
-            WHERE s.status = 'CHECKED_IN'
-            AND s.checkin_planned <= :target_date
-            AND s.checkout_planned > :target_date
-            ORDER BY s.room_number
-        """, {"target_date": target_date})
+        return self.fetch_all(
+        """
+        SELECT 
+            s.id AS stay_id,
+            s.reservation_id AS id,
+            r.reservation_no,
+            r.guest_name,
+            s.room_number,
+            s.checkin_planned,
+            s.checkout_planned,
+            r.meal_plan AS breakfast_code,
+            r.main_remark AS comment,
+            COALESCE(s.parking_space, '') AS parking_space,
+            COALESCE(s.parking_plate, '') AS parking_plate,
+            s.status
+        FROM stays s
+        JOIN reservations r ON r.id = s.reservation_id
+        WHERE s.status = 'CHECKED_IN'
+        AND date(s.checkin_planned) <= date(?)
+        AND date(s.checkout_planned) > date(?)
+        ORDER BY s.room_number
+        """,
+        (target_date.isoformat(), target_date.isoformat()),
+    )
+
 
 
 
 
 
     def get_departures_for_date(self, d: date):
-        return self._fetch_all("""
+        return self.fetch_all(
+            """
             SELECT r.id, r.reservation_no, r.guest_name, r.room_number,
-                r.arrival_date as checkin_planned, r.depart_date as checkout_planned,
-                COALESCE(s.status, 'EXPECTED') as status, COALESCE(s.id, r.id) as stay_id
-            FROM reservations r LEFT JOIN stays s ON s.reservation_id = r.id
-            WHERE r.depart_date = :date AND r.room_number IS NOT NULL AND r.room_number != ''
+                r.arrival_date AS checkin_planned, r.depart_date AS checkout_planned,
+                COALESCE(s.status, 'EXPECTED') AS status, COALESCE(s.id, r.id) AS stay_id
+            FROM reservations r
+            LEFT JOIN stays s ON s.reservation_id = r.id
+            WHERE date(r.depart_date) = date(?)
+            AND r.room_number IS NOT NULL AND r.room_number != ''
             AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
-            ORDER BY CAST(r.room_number::NUMERIC AS INTEGER)
-        """, {"date": d})
+            ORDER BY CAST(r.room_number AS INTEGER)
+            """,
+            (d.isoformat(),),
+        )
+
 
 
 
@@ -608,26 +704,27 @@ class FrontOfficeDB:
         """Checkout a guest - handles both stay IDs and reservation IDs"""
     
         # Try to find existing stay
-        stay = self._fetch_one("SELECT * FROM stays WHERE id = :id", {"id": stay_id})
+        stay = self.fetch_one("SELECT * FROM stays WHERE id = ?", (stay_id,))
         
         if stay:
             # Actual stay exists - update it
-            self._execute("""
-                UPDATE stays 
-                SET status = 'CHECKED_OUT', checkout_actual = CURRENT_TIMESTAMP 
-                WHERE id = :id
-            """, {"id": stay_id})
-            
-            self._execute("UPDATE rooms SET status = 'VACANT' WHERE room_number = :room", 
-                        {"room": stay["room_number"]})
+            self.execute(
+            "UPDATE stays SET status = 'CHECKED_OUT', checkout_actual = datetime('now') WHERE id = ?",
+            (stay_id,),
+        )
+            self.execute(
+            "UPDATE rooms SET status = 'VACANT' WHERE room_number = ?",
+            (stay["room_number"],),
+)
         else:
             # No stay exists - create one as checked out
-            res = self._fetch_one("SELECT * FROM reservations WHERE id = :id", {"id": stay_id})
+            res = self.fetch_one("SELECT * FROM reservations WHERE id = ?", (stay_id,))
+
             
             if not res or not res["room_number"]:
                 return False, "Reservation not found or no room assigned"
             
-            self._execute("""
+            self.execute("""
                 INSERT INTO stays (reservation_id, room_number, status, 
                                 checkin_planned, checkout_planned, 
                                 checkin_actual, checkout_actual)
@@ -640,37 +737,53 @@ class FrontOfficeDB:
                 "dep": res["depart_date"]
             })
             
-            self._execute("UPDATE rooms SET status = 'VACANT' WHERE room_number = :room", 
-                        {"room": res["room_number"]})
+            self.execute(
+    "UPDATE rooms SET status = 'VACANT' WHERE room_number = ?",
+    (res["room_number"],),
+)
+
         
         return True, "Checked out successfully"
 
 
 
+    from contextlib import closing
+
     def seed_rooms_from_blocks(self):
-        with self.engine.begin() as conn:
+        with closing(self.get_conn()) as conn, conn:
+            c = conn.cursor()
             for start, end in ROOM_BLOCKS:
                 for rn in range(start, end + 1):
-                    conn.execute(text("""
-                        INSERT INTO rooms (room_number, status) VALUES (:room, 'VACANT')
-                        ON CONFLICT (room_number) DO NOTHING
-                    """), {"room": str(rn)})
+                    c.execute(
+                        "INSERT OR IGNORE INTO rooms (room_number, status) VALUES (?, 'VACANT')",
+                        (str(rn),),
+                    )
+
 
     def sync_room_status_from_stays(self):
-        self._execute("UPDATE rooms SET status = 'VACANT'")
-        occupied = self._fetch_all("SELECT DISTINCT room_number FROM stays WHERE status = 'CHECKED_IN'")
+        self.execute("UPDATE rooms SET status = 'VACANT'")
+        occupied = self.fetch_all("SELECT DISTINCT room_number FROM stays WHERE status = 'CHECKED_IN'")
         for row in occupied:
-            self._execute("UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = :room", {"room": row["room_number"]})
+            self.execute(
+    "UPDATE rooms SET status = 'OCCUPIED' WHERE room_number = ?",
+    (row["room_number"],),
+)
+
     
     def update_parking_for_stay(self, stay_id: int, space: str, plate: str, notes: str):
-        self._execute("""
-            UPDATE stays SET parking_space = :space, parking_plate = :plate, parking_notes = :notes
-            WHERE id = :id
-        """, {"space": space, "plate": plate, "notes": notes, "id": stay_id})
+        self.execute(
+    """
+    UPDATE stays
+    SET parking_space = ?, parking_plate = ?, parking_notes = ?
+    WHERE id = ?
+    """,
+    (space, plate, notes, stay_id),
+)
+
     # ---- parking helpers ----
 
     def get_parking_overview_for_date(self, d: date):
-        return self._fetch_all("""
+        return self.fetch_all("""
             SELECT s.*, r.guest_name FROM stays s
             JOIN reservations r ON r.id = s.reservation_id
             WHERE s.checkin_planned <= :date AND s.checkout_planned > :date
@@ -680,43 +793,47 @@ class FrontOfficeDB:
 
 
     def add_task(self, task_date: date, title: str, created_by: str, assigned_to: str, comment: str):
-        self._execute("""
+        self.execute("""
             INSERT INTO tasks (task_date, title, created_by, assigned_to, comment)
             VALUES (:date, :title, :by, :to, :comment)
         """, {"date": task_date, "title": title, "by": created_by, "to": assigned_to, "comment": comment})
     
     def get_tasks_for_date(self, d: date):
-        return self._fetch_all("SELECT * FROM tasks WHERE task_date = :date ORDER BY created_at", {"date": d})
+        return self.fetch_all("SELECT * FROM tasks WHERE task_date = :date ORDER BY created_at", {"date": d})
     
     def add_no_show(self, arrival_date: date, guest_name: str, main_client: str, charged: bool, 
                 amount_charged: float, amount_pending: float, comment: str):
         # Check if already exists
-        existing = self._fetch_one("""
+        existing = self.fetch_one("""
             SELECT id FROM no_shows 
             WHERE guest_name = :guest AND arrival_date = :date
         """, {"guest": guest_name, "date": arrival_date})
         
         if existing:
-            # Update existing
-            self._execute("""
+           # Update existing
+            self.execute(
+                """
                 UPDATE no_shows SET
-                    main_client = :client,
-                    charged = :charged,
-                    amount_charged = :amt_charged,
-                    amount_pending = :amt_pending,
-                    comment = :comment
-                WHERE id = :id
-            """, {
-                "client": main_client,
-                "charged": int(charged),
-                "amt_charged": amount_charged or 0,
-                "amt_pending": amount_pending or 0,
-                "comment": comment,
-                "id": existing["id"]
-            })
+                    main_client = ?,
+                    charged = ?,
+                    amount_charged = ?,
+                    amount_pending = ?,
+                    comment = ?
+                WHERE id = ?
+                """,
+                (
+                    main_client,
+                    int(charged),
+                    amount_charged or 0,
+                    amount_pending or 0,
+                    comment,
+                    existing["id"],
+                ),
+            )
+
         else:
             # Insert new
-            self._execute("""
+            self.execute("""
                 INSERT INTO no_shows (arrival_date, guest_name, main_client, charged, 
                                     amount_charged, amount_pending, comment)
                 VALUES (:date, :guest, :client, :charged, :amt_charged, :amt_pending, :comment)
@@ -732,24 +849,24 @@ class FrontOfficeDB:
 
 
     def get_no_shows_for_date(self, d: date):
-        return self._fetch_all("SELECT * FROM no_shows WHERE arrival_date = :date ORDER BY created_at", {"date": d})
+        return self.fetch_all("SELECT * FROM no_shows WHERE arrival_date = :date ORDER BY created_at", {"date": d})
     
     def get_twin_rooms(self):
-        rows = self._fetch_all("SELECT room_number FROM rooms WHERE is_twin = 1 ORDER BY CAST(room_number AS INTEGER)")
+        rows = self.fetch_all("SELECT room_number FROM rooms WHERE is_twin = 1 ORDER BY CAST(room_number AS INTEGER)")
         return [r["room_number"] for r in rows]
     
     def get_all_rooms(self):
-        rows = self._fetch_all("SELECT room_number FROM rooms ORDER BY CAST(room_number AS INTEGER)")
+        rows = self.fetch_all("SELECT room_number FROM rooms ORDER BY CAST(room_number AS INTEGER)")
         return [r["room_number"] for r in rows]
     
     def set_spare_rooms_for_date(self, target_date: date, rooms: list):
-        self._execute("DELETE FROM spare_rooms WHERE target_date = :date", {"date": target_date})
+        self.execute("DELETE FROM spare_rooms WHERE target_date = :date", {"date": target_date})
         for rn in rooms:
-            self._execute("INSERT INTO spare_rooms (target_date, room_number) VALUES (:date, :room)", 
+            self.execute("INSERT INTO spare_rooms (target_date, room_number) VALUES (:date, :room)", 
                          {"date": target_date, "room": rn})
     
     def get_spare_rooms_for_date(self, target_date: date):
-        rows = self._fetch_all("""
+        rows = self.fetch_all("""
             SELECT room_number FROM spare_rooms WHERE target_date = :date
             ORDER BY CAST(room_number AS INTEGER)
         """, {"date": target_date})
@@ -757,15 +874,18 @@ class FrontOfficeDB:
     
     def search_reservations(self, q: str):
         like = f"%{q}%"
-        return self._fetch_all("""
+        return self.fetch_all("""
             SELECT * FROM reservations
-            WHERE guest_name ILIKE :q OR room_number ILIKE :q OR reservation_no ILIKE :q
-               OR main_client ILIKE :q OR channel ILIKE :q
+            WHERE guest_name LIKE :q OR room_number LIKE :q OR reservation_no LIKE :q
+               OR main_client LIKE :q OR channel LIKE :q
             ORDER BY arrival_date DESC LIMIT 500
         """, {"q": like})
     
     def read_table(self, name: str):
-        return pd.read_sql_query(f"SELECT * FROM {name}", self.engine)
+        from contextlib import closing
+        with closing(self.get_conn()) as conn:
+            return pd.read_sql_query(f"SELECT * FROM {name}", conn)
+
 
 
     def export_arrivals_excel(self, d: date):
@@ -896,8 +1016,9 @@ def page_arrivals():
         with st.expander(f"{idx} - {r['guest_name']} |  Reservation No.: {res_no}", expanded=True):
             # Add check-in/checkout dates at top
             col1, col2, col3, col4 = st.columns(4)
-            col1.write(f"**Arrival:** {r['arrival_date']}")
-            col2.write(f"**Departure:** {r['depart_date']}")
+            col1.write(f"Arrival: {format_date(r['arrival_date'])}")
+            col2.write(f"Departure: {format_date(r['depart_date'])}")
+
             col3.write(f"**Nights:** {r.get('nights', '')}")
             col4.write(f"**Guests:** {r.get('total_guests', '')}")
             
@@ -976,7 +1097,7 @@ def page_inhouse_list():
             for idx, guest in enumerate(checked_in_guests, 1):
                 col1, col2 = st.columns([4, 1])
                 col1.write(f"**{idx}.** Room {guest['room_number']} - {guest['guest_name']}")
-                if col2.button("Cancel", key=f"cancel_{guest['id']}", use_container_width=True):
+                if col2.button("Cancel", key=f"cancel_{idx}_{guest['id']}", use_container_width=True):
                     success, msg = db.cancel_checkin(guest["id"])
                     if success:
                         st.success(msg)
@@ -1008,7 +1129,10 @@ def page_checkout_list():
         for idx, row_data in enumerate(dep_rows, 1):
             row_dict = dict(row_data)
             col1, col2 = st.columns([4, 1])
-            col1.write(f"**{idx}.** Room {row_dict['room_number']} - {row_dict['guest_name']}")
+            # for room decimal
+            room_num = int(float(row_dict['room_number'])) if row_dict['room_number'] else ''
+            col1.write(f"**{idx}.** Room {room_num} - {row_dict['guest_name']}")
+
             if col2.button("Check-out", key=f"co_{row_dict['stay_id']}", use_container_width=True):
                 success, msg = db.checkout_stay(int(row_dict["stay_id"]))
                 if success:
@@ -1079,14 +1203,14 @@ def page_tasks_handover():
 
 def page_no_shows():
     st.header("No Shows")
-    d = st.date_input("Arrival date", value=date.today(), key="noshow_date")
+    d = st.date_input("Arrival date", value=date.today(), key="no_show_date")
     
     st.subheader("Add no-show")
     
     # Get potential no-shows
     potential = db.get_potential_no_shows(d)
     
-    with st.form("noshow_form", clear_on_submit=True):
+    with st.form("no_show_form", clear_on_submit=True):
         if potential:
             guest_options = ["Select a guest..."] + [
                 f"{g['guest_name']} (Res {g['reservation_no']}) - {g.get('main_client', '')}" 
@@ -1284,18 +1408,18 @@ def page_db_viewer():
     st.subheader("Database Overview")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
-    reservations_count = db._fetch_one("SELECT COUNT(*) as cnt FROM reservations")
-    stays_count = db._fetch_one("SELECT COUNT(*) as cnt FROM stays")
-    rooms_count = db._fetch_one("SELECT COUNT(*) as cnt FROM rooms")
-    tasks_count = db._fetch_one("SELECT COUNT(*) as cnt FROM tasks")
-    noshows_count = db._fetch_one("SELECT COUNT(*) as cnt FROM no_shows")
-    spare_count = db._fetch_one("SELECT COUNT(*) as cnt FROM spare_rooms")
+    reservations_count = db.fetch_one("SELECT COUNT(*) as cnt FROM reservations")
+    stays_count = db.fetch_one("SELECT COUNT(*) as cnt FROM stays")
+    rooms_count = db.fetch_one("SELECT COUNT(*) as cnt FROM rooms")
+    tasks_count = db.fetch_one("SELECT COUNT(*) as cnt FROM tasks")
+    no_shows_count = db.fetch_one("SELECT COUNT(*) as cnt FROM no_shows")
+    spare_count = db.fetch_one("SELECT COUNT(*) as cnt FROM spare_rooms")
     
     col1.metric("Reservations", reservations_count['cnt'])
     col2.metric("Stays", stays_count['cnt'])
     col3.metric("Rooms", rooms_count['cnt'])
     col4.metric("Tasks", tasks_count['cnt'])
-    col5.metric("No Shows", noshows_count['cnt'])
+    col5.metric("No Shows", no_shows_count['cnt'])
     col6.metric("Spare Rooms", spare_count['cnt'])
     
     st.divider()
@@ -1318,7 +1442,10 @@ def page_db_viewer():
         mask = df.astype(str).apply(lambda row: row.str.contains(search, case=False).any(), axis=1)
         df = df[mask].head(limit)
     else:
-        df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT {limit}", db.engine)
+        df = db.read_table(table)
+        if limit:
+            df = df.head(limit)
+
     
     if df.empty:
         st.info(f"No rows in {table}")
@@ -1360,23 +1487,237 @@ def page_db_viewer():
         )
         st.success(f"Database size: {len(backup_data)/1024:.1f} KB")
     
-
-
-
+def page_admin_upload():
+    st.header("Admin: Upload Database Data")
+    
+    # Add password protection
+    password = st.text_input("Admin Password", type="password")
+    if password != st.secrets.get("ADMIN_PASSWORD", "Raddison2025#"):
+        st.warning("Enter admin password to access this page")
+        return
+    
+    tab1, tab2, tab3 = st.tabs(["Upload Full DB", "Upload Stays CSV", "Download DB"])
+    
+    with tab1:
+        st.subheader("Replace Entire Database")
+        st.warning("⚠️ This will replace the entire database file")
+        
+        uploaded_db = st.file_uploader("Upload SQLite database (.db)", type=['db'], key="db_upload")
+        
+        if uploaded_db:
+            st.info(f"File size: {uploaded_db.size / 1024:.1f} KB")
+            
+            if st.button("Replace Database", type="primary"):
+                try:
+                    # Backup current DB first
+                    import shutil
+                    backup_path = DBPATH + ".backup"
+                    shutil.copy2(DBPATH, backup_path)
+                    
+                    # Replace with uploaded
+                    with open(DBPATH, 'wb') as f:
+                        f.write(uploaded_db.getbuffer())
+                    
+                    st.success("✅ Database replaced successfully!")
+                    st.info("Reloading app...")
+                    time.sleep(1)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+    
+    with tab2:
+        st.subheader("Import Stays from CSV")
+        
+        uploaded_csv = st.file_uploader("Upload stays CSV", type=['csv'], key="csv_upload")
+        
+        if uploaded_csv:
+            import pandas as pd
+            df = pd.read_csv(uploaded_csv)
+            
+            st.write(f"**Preview:** {len(df)} rows")
+            st.dataframe(df.head(10))
+            
+            st.write("**Expected columns:** `id, reservation_id, room_number, status, checkin_planned, checkout_planned, checkin_actual, checkout_actual, parking_space, parking_plate, parking_notes`")
+            
+            if st.button("Import Stays", type="primary"):
+                try:
+                    with st.spinner("Importing stays..."):
+                        count = 0
+                        for _, row in df.iterrows():
+                            db.execute(
+                                """
+                                INSERT OR REPLACE INTO stays (
+                                    id, reservation_id, room_number, status,
+                                    checkin_planned, checkout_planned,
+                                    checkin_actual, checkout_actual,
+                                    parking_space, parking_plate, parking_notes
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    row.get("id"),
+                                    row.get("reservation_id"),
+                                    row.get("room_number"),
+                                    row.get("status", "CHECKED_IN"),
+                                    row.get("checkin_planned"),
+                                    row.get("checkout_planned"),
+                                    row.get("checkin_actual"),
+                                    row.get("checkout_actual"),
+                                    row.get("parking_space", ""),
+                                    row.get("parking_plate", ""),
+                                    row.get("parking_notes", ""),
+                                ),
+                            )
+                            count += 1
+                        
+                        st.success(f"✅ Imported {count} stays")
+                    
+                    # 1. Update room statuses based on stays
+                    with st.spinner("Syncing room statuses..."):
+                        db.sync_room_status_from_stays()
+                        st.success("✅ Room statuses synced")
+                    
+                    # 2. Verify linkage between stays and reservations
+                    with st.spinner("Verifying data linkage..."):
+                        orphaned = db.fetch_one("""
+                            SELECT COUNT(*) as cnt FROM stays s
+                            LEFT JOIN reservations r ON s.reservation_id = r.id
+                            WHERE r.id IS NULL
+                        """)
+                        
+                        if orphaned['cnt'] > 0:
+                            st.warning(f"⚠️ Found {orphaned['cnt']} stays without matching reservations")
+                        else:
+                            st.success("✅ All stays linked to reservations")
+                    
+                    # 3. Show summary by status
+                    with st.spinner("Verifying data..."):
+                        checked_in = db.fetch_one(
+                            "SELECT COUNT(*) as cnt FROM stays WHERE status = 'CHECKED_IN'"
+                        )
+                        checked_out = db.fetch_one(
+                            "SELECT COUNT(*) as cnt FROM stays WHERE status = 'CHECKED_OUT'"
+                        )
+                        occupied = db.fetch_one(
+                            "SELECT COUNT(*) as cnt FROM rooms WHERE status = 'OCCUPIED'"
+                        )
+                        
+                        # Check departures for today
+                        today = date.today()
+                        departures_today = db.fetch_one(
+                            """
+                            SELECT COUNT(*) as cnt
+                            FROM reservations r
+                            LEFT JOIN stays s ON s.reservation_id = r.id
+                            WHERE date(r.depart_date) = date(?)
+                            AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
+                            """,
+                            (today.isoformat(),)
+                        )
+                        
+                        st.info(f"""
+                        **Data Summary:**
+                        - Checked-in guests: {checked_in['cnt']}
+                        - Already checked out: {checked_out['cnt']}
+                        - Occupied rooms: {occupied['cnt']}
+                        - Departures today: {departures_today['cnt']}
+                        """)
+                    
+                    st.success("🎉 Stays imported successfully!")
+                    time.sleep(2)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error importing: {str(e)}")
+                    st.exception(e)
+    with tab3:
+        st.subheader("Download Live Database")
+        st.info("Downloads a ZIP file containing the database file and CSV exports of all tables")
+        
+        if st.button("Generate Download Package", type="primary"):
+            try:
+                import zipfile
+                import io
+                import pandas as pd
+                
+                with st.spinner("Creating download package..."):
+                    # Create in-memory zip file
+                    zip_buffer = io.BytesIO()
+                    
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        # 1. Add the database file
+                        with open(DBPATH, 'rb') as db_file:
+                            zip_file.writestr("hotelfo.db", db_file.read())
+                        
+                        # 2. Export all tables to CSV
+                        tables = ['reservations', 'stays', 'rooms', 'no_shows', 'spare_rooms', 'tasks']
+                        
+                        for table_name in tables:
+                            try:
+                                # Get table data
+                                rows = db.fetch_all(f"SELECT * FROM {table_name}")
+                                
+                                if rows:
+                                    # Convert to pandas DataFrame
+                                    df = pd.DataFrame([dict(row) for row in rows])
+                                    
+                                    # Convert to CSV string
+                                    csv_buffer = io.StringIO()
+                                    df.to_csv(csv_buffer, index=False)
+                                    
+                                    # Add to zip
+                                    zip_file.writestr(f"{table_name}.csv", csv_buffer.getvalue())
+                                    
+                                    st.success(f"✅ Exported {table_name}: {len(rows)} rows")
+                                else:
+                                    st.info(f"ℹ️ {table_name}: empty")
+                                    
+                            except Exception as e:
+                                st.warning(f"⚠️ Could not export {table_name}: {str(e)}")
+                    
+                    # Prepare download
+                    zip_buffer.seek(0)
+                    
+                    # Generate filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"hotelfo_backup_{timestamp}.zip"
+                    
+                    st.download_button(
+                        label="⬇️ Download Database Package",
+                        data=zip_buffer,
+                        file_name=filename,
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
+                    
+                    st.success("🎉 Download package ready!")
+                    
+            except Exception as e:
+                st.error(f"❌ Error creating download: {str(e)}")
+                st.exception(e)
 
 
 def main():
     st.set_page_config(
-        page_title="Front Office",
+        page_title="Radisson Blu Bristol",
         page_icon="🏨",
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    
+    menu_options = {
+    "Arrivals": page_arrivals,
+    "In-House List": page_inhouse_list,
+    "Checkout List": page_checkout_list,
+    # ... other pages
+    "Admin Upload": page_admin_upload,  # Add this
+}
+
     # Initialize database here (after set_page_config)
     global db
-    if db is None:
-        db = FrontOfficeDB()
+    db = FrontOfficeDB(DBPATH)
+
+
 
 
     with st.sidebar:
@@ -1398,13 +1739,14 @@ def main():
         "Spare Twin rooms",
         "Parking",
         "DB Viewer",
+        "Admin"
     ],
 )
 
 
 
         st.markdown("---")
-        st.caption("Arrivals load once from filesystem; all updates happen in this app.")
+        st.caption("Welcome to Radisson Blu v1.0")
 
     if page == "Arrivals":
         page_arrivals()
@@ -1430,6 +1772,8 @@ def main():
         page_parking()
     elif page == "DB Viewer":
         page_db_viewer()
+    elif page == "Admin":
+        page_admin_upload()
 
 
 if __name__ == "__main__":
