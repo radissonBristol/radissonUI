@@ -1482,7 +1482,7 @@ def page_search():
         # Exact or partial room match
         rows = db.fetch_all(
             """
-            SELECT * FROM reservations
+            SELECT * FROM stays
             WHERE room_number LIKE ?
             ORDER BY arrival_date DESC
             LIMIT 500
@@ -1492,7 +1492,7 @@ def page_search():
     elif search_type == "Guest Name":
         rows = db.fetch_all(
             """
-            SELECT * FROM reservations
+            SELECT * FROM stays
             WHERE guest_name LIKE ?
             ORDER BY arrival_date DESC
             LIMIT 500
@@ -1502,7 +1502,7 @@ def page_search():
     elif search_type == "Reservation No":
         rows = db.fetch_all(
             """
-            SELECT * FROM reservations
+            SELECT * FROM stays
             WHERE reservation_no LIKE ?
             ORDER BY arrival_date DESC
             LIMIT 500
@@ -1512,7 +1512,7 @@ def page_search():
     elif search_type == "Main Client":
         rows = db.fetch_all(
             """
-            SELECT * FROM reservations
+            SELECT * FROM stays
             WHERE main_client LIKE ?
             ORDER BY arrival_date DESC
             LIMIT 500
@@ -1522,7 +1522,7 @@ def page_search():
     elif search_type == "Channel":
         rows = db.fetch_all(
             """
-            SELECT * FROM reservations
+            SELECT * FROM stays
             WHERE channel LIKE ?
             ORDER BY arrival_date DESC
             LIMIT 500
