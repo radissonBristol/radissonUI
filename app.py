@@ -715,15 +715,13 @@ class FrontOfficeDB:
     def get_departures_for_date(self, d: date):
         return self.fetch_all(
             """
-            SELECT r.id, r.reservation_no, r.guest_name, r.room_number,
-                r.arrival_date AS checkin_planned, r.depart_date AS checkout_planned,
-                COALESCE(s.status, 'EXPECTED') AS status, COALESCE(s.id, r.id) AS stay_id
-            FROM reservations r
-            LEFT JOIN stays s ON s.reservation_id = r.id
-            WHERE date(r.depart_date) = date(?)
-            AND r.room_number IS NOT NULL AND r.room_number != ''
-            AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
-            ORDER BY CAST(r.room_number AS INTEGER)
+            SELECT s.id AS stay_id, r.id, r.reservation_no, r.guest_name, s.room_number,
+                s.checkin_planned, s.checkout_planned, s.status
+            FROM stays s
+            JOIN reservations r ON r.id = s.reservation_id
+            WHERE s.status = 'CHECKED_IN'
+            AND date(s.checkout_planned) = date(?)
+            ORDER BY CAST(s.room_number AS INTEGER)
             """,
             (d.isoformat(),),
         )
