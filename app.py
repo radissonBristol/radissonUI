@@ -1315,20 +1315,152 @@ def page_no_shows():
 
 
 def page_search():
-    st.header("Search")
-    q = st.text_input("Search (guest, room, reservation no., company, channel)")
+    st.header("Search Reservations")
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        search_type = st.selectbox(
+            "Search by",
+            [
+                "Guest Name",
+                "Room Number",
+                "Reservation No",
+                "Main Client",
+                "Channel",
+                "All Fields"
+            ]
+        )
+    
+    with col2:
+        q = st.text_input(
+            "Search term",
+            placeholder=f"Enter {search_type.lower()}...",
+            key="search_input"
+        )
+    
     if not q:
-        st.info("Enter a search term.")
+        st.info("Enter a search term to find reservations.")
         return
-    rows = db.search_reservations(q)
-    df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
-    if df.empty:
-        st.warning("No matches.")
-    else:
-        df_clean = clean_numeric_columns(df, ["room_number", "reservation_no"])
-        st.dataframe(df_clean[["arrival_date", "depart_date", "guest_name", "room_number", "reservation_no", "channel", "rate_code", "main_remark"]],hide_index=True)
-
-
+    
+    # Build query based on search type
+    like_pattern = f"%{q}%"
+    
+    if search_type == "Room Number":
+        # Exact or partial room match
+        rows = db.fetch_all(
+            """
+            SELECT * FROM reservations
+            WHERE room_number LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern,),
+        )
+    elif search_type == "Guest Name":
+        rows = db.fetch_all(
+            """
+            SELECT * FROM reservations
+            WHERE guest_name LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern,),
+        )
+    elif search_type == "Reservation No":
+        rows = db.fetch_all(
+            """
+            SELECT * FROM reservations
+            WHERE reservation_no LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern,),
+        )
+    elif search_type == "Main Client":
+        rows = db.fetch_all(
+            """
+            SELECT * FROM reservations
+            WHERE main_client LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern,),
+        )
+    elif search_type == "Channel":
+        rows = db.fetch_all(
+            """
+            SELECT * FROM reservations
+            WHERE channel LIKE ?
+            ORDER BY arrival_date DESC
+            LIMIT 500
+            """,
+            (like_pattern,),
+        )
+    else:  # All Fields
+        rows = db.search_reservations(q)
+    
+    # Display results
+    if not rows:
+        st.warning(f"No reservations found matching '{q}' in {search_type}.")
+        return
+    
+    st.success(f"Found {len(rows)} reservation(s)")
+    
+    # Create display DataFrame
+    df = pd.DataFrame([dict(r) for r in rows])
+    df_clean = clean_numeric_columns(df, ["room_number", "reservation_no"])
+    
+    # Select and format columns for display
+    display_cols = [
+        "arrival_date", "depart_date", "guest_name", "room_number",
+        "reservation_no", "channel", "rate_code", "main_client", "main_remark"
+    ]
+    
+    # Only show columns that exist
+    display_cols = [col for col in display_cols if col in df_clean.columns]
+    
+    st.dataframe(
+        df_clean[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "arrival_date": st.column_config.TextColumn("Arrival"),
+            "depart_date": st.column_config.TextColumn("Departure"),
+            "guest_name": st.column_config.TextColumn("Guest Name"),
+            "room_number": st.column_config.TextColumn("Room"),
+            "reservation_no": st.column_config.TextColumn("Res No"),
+            "channel": st.column_config.TextColumn("Channel"),
+            "rate_code": st.column_config.TextColumn("Rate"),
+            "main_client": st.column_config.TextColumn("Client"),
+            "main_remark": st.column_config.TextColumn("Remarks"),
+        }
+    )
+    
+    # Show detailed view option
+    with st.expander("📋 View Full Details"):
+        for idx, row in enumerate(rows, 1):
+            with st.container():
+                st.markdown(f"### {idx}. {row['guest_name']} - Room {format_room_number(row.get('room_number', 'Not assigned'))}")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                col1.write(f"**Arrival:** {format_date(row['arrival_date'])}")
+                col2.write(f"**Departure:** {format_date(row['depart_date'])}")
+                col3.write(f"**Nights:** {row.get('nights', 'N/A')}")
+                col4.write(f"**Guests:** {row.get('total_guests', 'N/A')}")
+                
+                col1, col2, col3 = st.columns(3)
+                col1.write(f"**Res No:** {row.get('reservation_no', 'N/A')}")
+                col2.write(f"**Channel:** {row.get('channel', 'N/A')}")
+                col3.write(f"**Meal Plan:** {row.get('meal_plan', 'N/A')}")
+                
+                if row.get('main_remark'):
+                    st.info(f"📝 {row['main_remark']}")
+                
+                if row.get('main_client'):
+                    st.caption(f"Client: {row['main_client']}")
+                
+                st.divider()
 
 def page_room_list():
     st.header("Room List")
