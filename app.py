@@ -320,14 +320,13 @@ class FrontOfficeDB:
             
             # 1. Checkouts
             c.execute("""
-                SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks,
-                    s.status
-                FROM reservations r
-                LEFT JOIN stays s ON s.reservation_id = r.id
-                WHERE r.depart_date LIKE ?
-                AND r.room_number IS NOT NULL AND r.room_number != ''
-                ORDER BY CAST(r.room_number AS INTEGER)
-            """, (f"{target_str}%",))
+            SELECT s.roomnumber, r.guestname, r.mainremark, r.totalremarks, s.status
+            FROM stays s
+            JOIN reservations r ON r.id = s.reservationid
+            WHERE s.status = 'CHECKED_IN'
+            AND s.checkoutplanned LIKE ?
+            ORDER BY CAST(s.roomnumber AS INTEGER)
+        """, (f"{target_date.isoformat()}%",))
             
             checkouts = c.fetchall()
             
