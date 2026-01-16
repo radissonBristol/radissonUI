@@ -279,112 +279,103 @@ class FrontOfficeDB:
         )
 
     def generate_hsk_tasks_for_date(self, target_date: date):
+        """Auto-generate housekeeping tasks for the day"""
         tasks = []
         
-        # 1. Checkouts
-        checkouts = self.fetch_all(
-            """
+        with closing(self._get_conn()) as conn:
+            c = conn.cursor()
+            
+            # 1. Get all checkouts for today
+            c.execute("""
             SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
             FROM reservations r
-            LEFT JOIN stays s ON s.reservation_id = r.id
-            WHERE date(r.depart_date) = date(?)
+            WHERE DATE(r.depart_date) = DATE(?)
             AND r.room_number IS NOT NULL
-            AND (s.status IS NULL OR s.status != 'CHECKED_OUT')
+            AND r.room_number != ''
             ORDER BY CAST(r.room_number AS INTEGER)
-            """,
-            (target_date.isoformat(),),
-        )
-
-        for co in checkouts:
-            remarks = f"{co.get('main_remark') or co.get('total_remarks') or ''}".lower()
-            notes = []
-            priority = "HIGH"
+            """, (target_date.isoformat(),))
             
-            if '2t' in remarks:
-                notes.append("2 TWIN BEDS")
-            if 'vip' in remarks or 'birthday' in remarks:
-                notes.append("VIP/SPECIAL")
-                priority = "URGENT"
+            checkouts = c.fetchall()
             
-            tasks.append({
-                "room": co["room_number"],
-                "type": "CHECKOUT",
-                "priority": priority,
-                "task": f"Clean room {co['room_number']} - {co['guest_name']} checkout",
-                "notes": " | ".join(notes) if notes else ""
-            })
-
-        # 2. Stayovers
-        stayovers = self.fetch_all(
-            """
-            SELECT DISTINCT r.room_number, r.guest_name, r.main_remark, r.total_remarks
+            for co in checkouts:
+                room = co["room_number"]
+                guest = co["guest_name"]
+                
+                # Default checkout cleaning task
+                task = {
+                    "room": room,
+                    "task_type": "CHECKOUT",
+                    "priority": "HIGH",
+                    "description": f"Clean room {room} - {guest} checkout",
+                    "notes": []
+                }
+                
+                # Check for 2T (twin beds) in remarks
+                remarks = f"{co['main_remark'] or ''} {co['total_remarks'] or ''}".lower()
+                if "2t" in remarks:
+                    task["notes"].append("⚠️ 2 TWIN BEDS")
+                
+                # Check for other special requests
+                if "vip" in remarks or "birthday" in remarks:
+                    task["priority"] = "URGENT"
+                    task["notes"].append("🌟 VIP/SPECIAL")
+                
+                tasks.append(task)
+            
+            # 2. Get stayovers (in-house yesterday and today) - light cleaning
+            c.execute("""
+            SELECT DISTINCT r.room_number, r.guest_name
             FROM reservations r
-            LEFT JOIN stays s ON s.reservation_id = r.id
-            WHERE date(r.arrival_date) < date(?)
-            AND date(r.depart_date) > date(?)
+            WHERE DATE(r.arrival_date) < DATE(?)
+            AND DATE(r.depart_date) > DATE(?)
             AND r.room_number IS NOT NULL
-            AND (s.status = 'CHECKED_IN' OR s.status IS NULL)
+            AND r.room_number != ''
             ORDER BY CAST(r.room_number AS INTEGER)
-            """,
-            (target_date.isoformat(), target_date.isoformat()),
-        )
-
-        for so in stayovers:
-            remarks = f"{so.get('main_remark') or so.get('total_remarks') or ''}".lower()
-            notes = []
-            priority = "MEDIUM"
+            """, (target_date.isoformat(), target_date.isoformat()))
             
-            if 'vip' in remarks:
-                notes.append("VIP GUEST")
-                priority = "HIGH"
-            if 'dnd' in remarks or 'do not disturb' in remarks:
-                notes.append("DND - Check later")
+            stayovers = c.fetchall()
             
-            tasks.append({
-                "room": so["room_number"],
-                "type": "STAYOVER",
-                "priority": priority,
-                "task": f"Refresh room {so['room_number']} - {so['guest_name']} stayover",
-                "notes": " | ".join(notes) if notes else ""
-            })
-
-        # 3. Arrivals
-        arrivals = self.fetch_all(
-            """
+            for so in stayovers:
+                tasks.append({
+                    "room": so["room_number"],
+                    "task_type": "STAYOVER",
+                    "priority": "MEDIUM",
+                    "description": f"Refresh room {so['room_number']} - {so['guest_name']} stayover",
+                    "notes": []
+                })
+            
+            # 3. Get arrivals for today - prepare rooms
+            c.execute("""
             SELECT r.room_number, r.guest_name, r.main_remark, r.total_remarks
             FROM reservations r
-            WHERE date(r.arrival_date) = date(?)
+            WHERE DATE(r.arrival_date) = DATE(?)
             AND r.room_number IS NOT NULL
+            AND r.room_number != ''
             ORDER BY CAST(r.room_number AS INTEGER)
-            """,
-            (target_date.isoformat(),),
-        )
-
-        for arr in arrivals:
-            remarks = f"{arr.get('main_remark') or arr.get('total_remarks') or ''}".lower()
-            notes = []
-            priority = "HIGH"
+            """, (target_date.isoformat(),))
             
-            if '2t' in remarks:
-                notes.append("2 TWIN BEDS")
-            if 'accessible' in remarks or 'disabled' in remarks:
-                notes.append("ACCESSIBLE ROOM")
-                priority = "URGENT"
-            if 'early' in remarks or 'eci' in remarks:
-                notes.append("EARLY CHECK-IN")
-                priority = "URGENT"
-            if 'vip' in remarks or 'honeymoon' in remarks or 'anniversary' in remarks:
-                notes.append("VIP/SPECIAL")
-                priority = "URGENT"
+            arrivals = c.fetchall()
             
-            tasks.append({
-                "room": arr["room_number"],
-                "type": "ARRIVAL",
-                "priority": priority,
-                "task": f"Prepare room {arr['room_number']} for {arr['guest_name']} arrival",
-                "notes": " | ".join(notes) if notes else ""
-            })
-
+            for arr in arrivals:
+                room = arr["room_number"]
+                guest = arr["guest_name"]
+                
+                task = {
+                    "room": room,
+                    "task_type": "ARRIVAL",
+                    "priority": "HIGH",
+                    "description": f"Prepare room {room} for {guest} arrival",
+                    "notes": []
+                }
+                
+                remarks = f"{arr['main_remark'] or ''} {arr['total_remarks'] or ''}".lower()
+                if "2t" in remarks:
+                    task["notes"].append("⚠️ 2 TWIN BEDS")
+                if "accessible" in remarks or "disabled" in remarks:
+                    task["notes"].append("♿ ACCESSIBLE ROOM")
+                
+                tasks.append(task)
+        
         return tasks
 
 
